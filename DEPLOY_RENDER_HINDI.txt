@@ -1,0 +1,38 @@
+BTC AI SCALPING ENGINE V4 — ONLINE DEPLOYMENT
+
+A. GitHub
+1. github.com खोलें और Sign in करें.
+2. New repository बनाएं: btc-ai-scalping-engine-v4
+3. इस ZIP को extract करें.
+4. Repository में Add file → Upload files चुनें.
+5. Extracted folder के अंदर की सभी files/folders upload करें. ध्यान रहे package.json ROOT में हो और frontend folder भी ROOT में हो.
+6. Commit changes.
+
+B. Render
+1. render.com पर Sign in करें.
+2. New → Web Service.
+3. GitHub connect करें और btc-ai-scalping-engine-v4 repository चुनें.
+4. Name: btc-ai-scalping-engine-v4
+5. Runtime/Language: Node
+6. Build Command: npm install
+7. Start Command: npm start
+8. Health Check Path: /api/health
+9. Deploy Web Service.
+
+C. Deploy पूरा होने के बाद
+Render का URL मिलेगा, उदाहरण:
+https://btc-ai-scalping-engine-v4.onrender.com
+
+पहले Chrome में खोलें:
+https://YOUR-URL.onrender.com/api/health
+
+अगर JSON में ok:true और version:"V4.0.0" आता है, server सही है.
+फिर:
+https://YOUR-URL.onrender.com
+
+D. Phone
+Chrome → वही URL → menu → Add to Home screen.
+
+E. सुरक्षा
+.env, API keys या private credentials GitHub में upload न करें.
+Current V4 में CoinGlass key आवश्यक नहीं है.

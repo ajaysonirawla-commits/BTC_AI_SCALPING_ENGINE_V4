@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: btc-ai-scalping-engine-v4
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.14.1
