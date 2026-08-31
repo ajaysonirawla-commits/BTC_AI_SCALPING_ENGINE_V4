@@ -1,40 +1,1733 @@
-<!doctype html><html lang="hi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BTC/USD AI SCALPING ENGINE V4</title><script src="https://s3.tradingview.com/tv.js"></script><style>
-:root{--bg:#06111e;--card:#0c1b2b;--line:#23394f;--txt:#eef6ff;--muted:#9fb3c8;--g:#18d88a;--r:#ff4f62;--y:#ffd44d;--b:#57a8ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:14px Arial,sans-serif}header{position:sticky;top:0;z-index:20;background:#04101c;border-bottom:1px solid var(--line);padding:10px 16px;display:flex;gap:18px;align-items:center;justify-content:space-between}.brand{font-size:19px;font-weight:800;color:#ff9f18}.price{font-size:24px;font-weight:800}.up{color:var(--g)}.down{color:var(--r)}button,select{background:#14283d;color:#fff;border:1px solid #36516c;border-radius:7px;padding:7px 10px;cursor:pointer}.wrap{max-width:1550px;margin:auto;padding:12px}.grid{display:grid;grid-template-columns:2fr 1fr;gap:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:13px}.wide{grid-column:1/-1}.verdict{border:2px solid var(--y)}.verdict h2{margin:0 0 5px;color:var(--y);font-size:22px}.score{font-size:32px;font-weight:900}.kv{display:grid;grid-template-columns:1fr auto}.kv div{padding:7px 4px;border-bottom:1px solid var(--line)}.muted{color:var(--muted)}.chart{height:570px}.tv{width:100%;height:100%}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px;border-bottom:1px solid var(--line)}th{color:var(--muted)}.green{color:var(--g)}.red{color:var(--r)}.yellow{color:var(--y)}.pill{display:inline-block;padding:3px 8px;border-radius:12px;background:#17324b}.alerts{max-height:270px;overflow:auto}.alert{padding:9px;border-bottom:1px solid var(--line);cursor:pointer}.unread{font-weight:800}.ticker{white-space:nowrap;overflow:hidden;border-bottom:1px solid var(--line);background:#071727}.ticker span{display:inline-block;margin-right:25px;padding:8px}.news{max-height:240px;overflow:auto}.news a{color:#b7d9ff;text-decoration:none}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.music{display:grid;grid-template-columns:1fr 1fr;gap:10px}.music iframe{width:100%;height:180px;border:0;border-radius:8px}.small{font-size:12px}.sourceBtns a{display:inline-block;margin:3px;padding:7px 9px;border:1px solid #36516c;border-radius:7px;color:#fff;text-decoration:none}.goodbox{border-left:4px solid var(--g);padding-left:10px}.badbox{border-left:4px solid var(--r);padding-left:10px}@media(max-width:950px){.grid{grid-template-columns:1fr}.chart{height:500px}.music{grid-template-columns:1fr}}
-</style><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#06111e"></head><body>
-<header><div class="brand">₿ BTC/USD AI SCALPING ENGINE V4</div><div><span id="price" class="price">Loading…</span> <span id="change"></span></div><div class="row"><span>🔴 Alerts <b id="alertCount">0</b></span><button id="sound">🔊 ON</button><span id="live" class="pill">CONNECTING</span></div></header>
-<div class="ticker"><div id="indexTicker"></div></div>
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BTC/USD AI SCALPING ENGINE V4</title>
+
+<script src="https://s3.tradingview.com/tv.js"></script>
+
+<style>
+:root{
+ --bg:#06111e;
+ --card:#0c1b2b;
+ --line:#23394f;
+ --txt:#eef6ff;
+ --muted:#9fb3c8;
+ --g:#18d88a;
+ --r:#ff4f62;
+ --y:#ffd44d;
+ --b:#57a8ff;
+}
+
+*{box-sizing:border-box}
+
+body{
+ margin:0;
+ background:var(--bg);
+ color:var(--txt);
+ font:14px Arial,sans-serif
+}
+
+header{
+ position:sticky;
+ top:0;
+ z-index:20;
+ background:#04101c;
+ border-bottom:1px solid var(--line);
+ padding:10px 16px;
+ display:flex;
+ gap:18px;
+ align-items:center;
+ justify-content:space-between
+}
+
+.brand{
+ font-size:19px;
+ font-weight:800;
+ color:#ff9f18
+}
+
+.price{
+ font-size:24px;
+ font-weight:800
+}
+
+.up{color:var(--g)}
+.down{color:var(--r)}
+
+button,select{
+ background:#14283d;
+ color:#fff;
+ border:1px solid #36516c;
+ border-radius:7px;
+ padding:7px 10px;
+ cursor:pointer
+}
+
+.wrap{
+ max-width:1550px;
+ margin:auto;
+ padding:12px
+}
+
+.grid{
+ display:grid;
+ grid-template-columns:2fr 1fr;
+ gap:12px
+}
+
+.card{
+ background:var(--card);
+ border:1px solid var(--line);
+ border-radius:10px;
+ padding:13px
+}
+
+.wide{
+ grid-column:1/-1
+}
+
+.verdict{
+ border:2px solid var(--y)
+}
+
+.verdict h2{
+ margin:0 0 5px;
+ color:var(--y);
+ font-size:22px
+}
+
+.score{
+ font-size:32px;
+ font-weight:900
+}
+
+.kv{
+ display:grid;
+ grid-template-columns:1fr auto
+}
+
+.kv div{
+ padding:7px 4px;
+ border-bottom:1px solid var(--line)
+}
+
+.muted{
+ color:var(--muted)
+}
+
+.chart{
+ height:570px
+}
+
+.tv{
+ width:100%;
+ height:100%
+}
+
+table{
+ width:100%;
+ border-collapse:collapse
+}
+
+th,td{
+ text-align:left;
+ padding:7px;
+ border-bottom:1px solid var(--line)
+}
+
+th{
+ color:var(--muted)
+}
+
+.green{color:var(--g)}
+.red{color:var(--r)}
+.yellow{color:var(--y)}
+
+.pill{
+ display:inline-block;
+ padding:3px 8px;
+ border-radius:12px;
+ background:#17324b
+}
+
+.alerts{
+ max-height:270px;
+ overflow:auto
+}
+
+.alert{
+ padding:9px;
+ border-bottom:1px solid var(--line);
+ cursor:pointer
+}
+
+.unread{
+ font-weight:800
+}
+
+.ticker{
+ white-space:nowrap;
+ overflow:hidden;
+ border-bottom:1px solid var(--line);
+ background:#071727
+}
+
+.ticker span{
+ display:inline-block;
+ margin-right:25px;
+ padding:8px
+}
+
+.news{
+ max-height:240px;
+ overflow:auto
+}
+
+.news a{
+ color:#b7d9ff;
+ text-decoration:none
+}
+
+.row{
+ display:flex;
+ gap:8px;
+ flex-wrap:wrap;
+ align-items:center
+}
+
+.music{
+ display:grid;
+ grid-template-columns:1fr 1fr;
+ gap:10px
+}
+
+.music iframe{
+ width:100%;
+ height:180px;
+ border:0;
+ border-radius:8px
+}
+
+.small{
+ font-size:12px
+}
+
+.sourceBtns a{
+ display:inline-block;
+ margin:3px;
+ padding:7px 9px;
+ border:1px solid #36516c;
+ border-radius:7px;
+ color:#fff;
+ text-decoration:none
+}
+
+.goodbox{
+ border-left:4px solid var(--g);
+ padding-left:10px
+}
+
+.badbox{
+ border-left:4px solid var(--r);
+ padding-left:10px
+}
+
+.statusbox{
+ margin-top:8px;
+ padding:8px;
+ border-radius:7px;
+ background:#101f30;
+ border:1px solid var(--line)
+}
+
+@media(max-width:950px){
+ .grid{grid-template-columns:1fr}
+ .chart{height:500px}
+ .music{grid-template-columns:1fr}
+}
+</style>
+
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#06111e">
+</head>
+
+<body>
+
+<header>
+ <div class="brand">₿ BTC/USD AI SCALPING ENGINE V4</div>
+
+ <div>
+  <span id="price" class="price">Loading…</span>
+  <span id="change"></span>
+ </div>
+
+ <div class="row">
+  <span>🔴 Alerts <b id="alertCount">0</b></span>
+  <button id="sound">🔊 ON</button>
+  <span id="live" class="pill">CONNECTING</span>
+ </div>
+</header>
+
+<div class="ticker">
+ <div id="indexTicker"></div>
+</div>
+
 <div class="wrap">
-<section class="card verdict wide"><h2 id="verdict">🟡 WAIT — LIVE DATA LOADING</h2><div><span class="score" id="score">--</span>/100 &nbsp; <b id="conf">Confidence --</b> &nbsp; <span class="pill" id="coverage">Coverage --</span></div><div class="kv"><div>Entry</div><div id="entry">--</div><div>Stop Loss</div><div id="sl">--</div><div>Target 1</div><div id="t1">--</div><div>Target 2</div><div id="t2">--</div><div>Holding / Trade Window</div><div id="hold">--</div></div><p id="decision" class="muted">Decision support only — guaranteed profit नहीं।</p><div id="reasons" class="small"></div></section>
+
+<section class="card verdict wide">
+
+ <h2 id="verdict">🟡 WAIT — LIVE DATA LOADING</h2>
+
+ <div>
+  <span class="score" id="score">--</span>/100
+  &nbsp;
+  <b id="conf">Confidence --</b>
+  &nbsp;
+  <span class="pill" id="coverage">Coverage --</span>
+ </div>
+
+ <div class="kv">
+
+  <div>Entry</div>
+  <div id="entry">--</div>
+
+  <div>Stop Loss</div>
+  <div id="sl">--</div>
+
+  <div>Target 1</div>
+  <div id="t1">--</div>
+
+  <div>Target 2</div>
+  <div id="t2">--</div>
+
+  <div>Holding / Trade Window</div>
+  <div id="hold">--</div>
+
+ </div>
+
+ <p id="decision" class="muted">
+ Decision support only — guaranteed profit नहीं।
+ </p>
+
+ <div id="reasons" class="small"></div>
+
+ <div id="connectionInfo" class="statusbox">
+ Backend connection checking...
+ </div>
+
+</section>
+
+
 <div class="grid">
-<section class="card"><div class="row"><h3 style="margin:0">📈 TradingView BTCUSDT</h3><select id="tf"><option value="1">1m</option><option value="5" selected>5m</option><option value="10">10m</option><option value="30">30m</option><option value="60">1H</option><option value="D">1D</option></select><button id="refreshChart">Chart Refresh</button></div><div class="chart"><div id="tv_chart" class="tv"></div></div></section>
-<section class="card"><h3>🤖 AI Decision Engine</h3><div class="kv"><div>Price Structure</div><div id="fprice">--</div><div>RSI</div><div id="frsi">--</div><div>EMA + VWAP</div><div id="fema">--</div><div>Volume</div><div id="fvol">--</div><div>Open Interest</div><div id="foi">--</div><div>Funding</div><div id="ffund">--</div><div>Liquidation</div><div id="fliq">--</div><div>Large Trade Proxy</div><div id="flarge">--</div><div>ETF Flow</div><div id="fetf">--</div><div>Macro</div><div id="fmacro">--</div><div>Fear & Greed</div><div id="ffg">--</div><div>Institutional Pressure Proxy</div><div id="institutional">--</div></div></section>
-<section class="card wide"><h3>📊 BTC Market / Technical</h3><div class="kv"><div>BTC Price</div><div id="mprice">--</div><div>24H Volume</div><div id="mvol">--</div><div>RSI(14)</div><div id="mrsi">--</div><div>VWAP</div><div id="vwap">--</div><div>EMA20</div><div id="ema20">--</div><div>EMA50</div><div id="ema50">--</div><div>ATR</div><div id="atr">--</div><div>5m Trend</div><div id="trend5">--</div><div>15m Trend</div><div id="trend15">--</div></div></section>
-<section class="card"><h3>📌 Open Interest + Volume</h3><table><thead><tr><th>TF</th><th>OI</th><th>OI Δ%</th><th>Volume</th><th>Vol Δ%</th></tr></thead><tbody id="oi"></tbody></table><p class="muted small">OI is Binance Futures live snapshot; historical Δ% warms up while the dashboard remains running.</p></section>
-<section class="card"><h3>🌍 Correlated Global Indices</h3><table><thead><tr><th>Index</th><th>Value</th><th>5m Δ%</th></tr></thead><tbody id="markets"></tbody></table></section>
-<section class="card"><h3>🌐 Market Session Status</h3><div class="kv" id="sessions"></div><p id="sessionNote" class="muted small"></p></section>
-<section class="card"><h3>🔥 Liquidation / Positioning</h3><div class="kv"><div>1H Total</div><div id="liqTotal">--</div><div>Long Liquidation</div><div id="liqLong">--</div><div>Short Liquidation</div><div id="liqShort">--</div><div>Bias</div><div id="liqBias">--</div><div>Funding</div><div id="funding">--</div><div>Long/Short Ratio</div><div id="ls">--</div></div></section>
-<section class="card"><h3>🏦 Institutional Buying / Selling Proxy</h3><div id="instBox" class="goodbox">Calculating…</div><p class="muted small">यह true institutional order-book नहीं है; ETF flow + large-trade proxy + derivatives context से decision-support index है.</p></section>
-<section class="card wide"><h3>🚨 Live Breaking News / Macro / ETF</h3><div class="row sourceBtns" id="sourceBtns"></div><div id="news" class="news"></div></section>
-<section class="card wide"><h3>⏱️ Global Market Countdown</h3><div id="countdown" class="score">--</div><div class="muted">Next regular-session change (holiday calendar included नहीं है)</div></section>
-<section class="card wide"><h3>🎵 Music / Bhajan Box</h3><div class="row"><select id="musicSelect"><option value="PLUG">YouTube playlist/video चुनें</option><option value="https://www.youtube.com/watch?v=5qap5aO4i9A">Lo-fi / Calm</option><option value="https://www.youtube.com/results?search_query=Krishna+bhajan">Krishna Bhajan Search</option><option value="https://www.youtube.com/results?search_query=Hanuman+bhajan">Hanuman Bhajan Search</option><option value="https://www.youtube.com/results?search_query=Rajasthani+folk+music">Rajasthani Folk Search</option></select><button id="openMusic">Open YouTube</button><button id="muteMusic">Music help</button></div><p id="musicHelp" class="muted small">Browser autoplay restrictions के कारण external YouTube audio को बिना user click के जबरन चालू नहीं किया जा सकता। Open YouTube दबाकर playlist/video चलाएँ और वहीं volume बदलें.</p></section>
-<section class="card wide"><h3>🚨 Alert History</h3><div class="row"><button id="clear">Clear History</button><button id="markRead">Mark all read</button></div><div id="alerts" class="alerts"></div></section>
-<section class="card wide"><h3>🧾 Data Sources / Status</h3><table><thead><tr><th>Source</th><th>Status</th></tr></thead><tbody id="sources"></tbody></table><p class="muted small">TradingView chart is a visualization; exchange-derived price/derivatives values come from Binance. Alternative.me requires attribution. Farside ETF values are daily context, not tick-by-tick institutional order flow.</p></section>
-</div></div>
+
+<section class="card">
+
+ <div class="row">
+
+  <h3 style="margin:0">
+   📈 TradingView BTCUSDT
+  </h3>
+
+  <select id="tf">
+   <option value="1">1m</option>
+   <option value="5" selected>5m</option>
+   <option value="10">10m</option>
+   <option value="30">30m</option>
+   <option value="60">1H</option>
+   <option value="D">1D</option>
+  </select>
+
+  <button id="refreshChart">
+   Chart Refresh
+  </button>
+
+ </div>
+
+ <div class="chart">
+  <div id="tv_chart" class="tv"></div>
+ </div>
+
+</section>
+
+
+<section class="card">
+
+ <h3>🤖 AI Decision Engine</h3>
+
+ <div class="kv">
+
+  <div>Price Structure</div>
+  <div id="fprice">--</div>
+
+  <div>RSI</div>
+  <div id="frsi">--</div>
+
+  <div>EMA + VWAP</div>
+  <div id="fema">--</div>
+
+  <div>Volume</div>
+  <div id="fvol">--</div>
+
+  <div>Open Interest</div>
+  <div id="foi">--</div>
+
+  <div>Funding</div>
+  <div id="ffund">--</div>
+
+  <div>Liquidation</div>
+  <div id="fliq">--</div>
+
+  <div>Large Trade Proxy</div>
+  <div id="flarge">--</div>
+
+  <div>ETF Flow</div>
+  <div id="fetf">--</div>
+
+  <div>Macro</div>
+  <div id="fmacro">--</div>
+
+  <div>Fear & Greed</div>
+  <div id="ffg">--</div>
+
+  <div>Institutional Pressure Proxy</div>
+  <div id="institutional">--</div>
+
+ </div>
+
+</section>
+
+
+<section class="card wide">
+
+ <h3>📊 BTC Market / Technical</h3>
+
+ <div class="kv">
+
+  <div>BTC Price</div>
+  <div id="mprice">--</div>
+
+  <div>24H Volume</div>
+  <div id="mvol">--</div>
+
+  <div>RSI(14)</div>
+  <div id="mrsi">--</div>
+
+  <div>VWAP</div>
+  <div id="vwap">--</div>
+
+  <div>EMA20</div>
+  <div id="ema20">--</div>
+
+  <div>EMA50</div>
+  <div id="ema50">--</div>
+
+  <div>ATR</div>
+  <div id="atr">--</div>
+
+  <div>5m Trend</div>
+  <div id="trend5">--</div>
+
+  <div>15m Trend</div>
+  <div id="trend15">--</div>
+
+ </div>
+
+</section>
+
+
+<section class="card">
+
+ <h3>📌 Open Interest + Volume</h3>
+
+ <table>
+
+  <thead>
+   <tr>
+    <th>TF</th>
+    <th>OI</th>
+    <th>OI Δ%</th>
+    <th>Volume</th>
+    <th>Vol Δ%</th>
+   </tr>
+  </thead>
+
+  <tbody id="oi"></tbody>
+
+ </table>
+
+ <p class="muted small">
+ OI is Binance Futures live snapshot; historical Δ% warms up while the dashboard remains running.
+ </p>
+
+</section>
+
+
+<section class="card">
+
+ <h3>🌍 Correlated Global Indices</h3>
+
+ <table>
+
+  <thead>
+   <tr>
+    <th>Index</th>
+    <th>Value</th>
+    <th>5m Δ%</th>
+   </tr>
+  </thead>
+
+  <tbody id="markets"></tbody>
+
+ </table>
+
+</section>
+
+
+<section class="card">
+
+ <h3>🌐 Market Session Status</h3>
+
+ <div class="kv" id="sessions"></div>
+
+ <p id="sessionNote" class="muted small"></p>
+
+</section>
+
+
+<section class="card">
+
+ <h3>🔥 Liquidation / Positioning</h3>
+
+ <div class="kv">
+
+  <div>1H Total</div>
+  <div id="liqTotal">--</div>
+
+  <div>Long Liquidation</div>
+  <div id="liqLong">--</div>
+
+  <div>Short Liquidation</div>
+  <div id="liqShort">--</div>
+
+  <div>Bias</div>
+  <div id="liqBias">--</div>
+
+  <div>Funding</div>
+  <div id="funding">--</div>
+
+  <div>Long/Short Ratio</div>
+  <div id="ls">--</div>
+
+ </div>
+
+</section>
+
+
+<section class="card">
+
+ <h3>🏦 Institutional Buying / Selling Proxy</h3>
+
+ <div id="instBox" class="goodbox">
+  Calculating…
+ </div>
+
+ <p class="muted small">
+ यह true institutional order-book नहीं है; ETF flow + large-trade proxy + derivatives context से decision-support index है.
+ </p>
+
+</section>
+
+
+<section class="card wide">
+
+ <h3>🚨 Live Breaking News / Macro / ETF</h3>
+
+ <div class="row sourceBtns" id="sourceBtns"></div>
+
+ <div id="news" class="news"></div>
+
+</section>
+
+
+<section class="card wide">
+
+ <h3>⏱️ Global Market Countdown</h3>
+
+ <div id="countdown" class="score">--</div>
+
+ <div class="muted">
+ Next regular-session change (holiday calendar included नहीं है)
+ </div>
+
+</section>
+
+
+<section class="card wide">
+
+ <h3>🎵 Music / Bhajan Box</h3>
+
+ <div class="row">
+
+  <select id="musicSelect">
+
+   <option value="PLUG">
+    YouTube playlist/video चुनें
+   </option>
+
+   <option value="https://www.youtube.com/watch?v=5qap5aO4i9A">
+    Lo-fi / Calm
+   </option>
+
+   <option value="https://www.youtube.com/results?search_query=Krishna+bhajan">
+    Krishna Bhajan Search
+   </option>
+
+   <option value="https://www.youtube.com/results?search_query=Hanuman+bhajan">
+    Hanuman Bhajan Search
+   </option>
+
+   <option value="https://www.youtube.com/results?search_query=Rajasthani+folk+music">
+    Rajasthani Folk Search
+   </option>
+
+  </select>
+
+  <button id="openMusic">
+   Open YouTube
+  </button>
+
+ </div>
+
+ <p id="musicHelp" class="muted small">
+ Browser autoplay restrictions के कारण external YouTube audio को बिना user click के जबरन चालू नहीं किया जा सकता।
+ Open YouTube दबाकर playlist/video चलाएँ और वहीं volume बदलें.
+ </p>
+
+</section>
+
+
+<section class="card wide">
+
+ <h3>🚨 Alert History</h3>
+
+ <div class="row">
+
+  <button id="clear">
+   Clear History
+  </button>
+
+  <button id="markRead">
+   Mark all read
+  </button>
+
+ </div>
+
+ <div id="alerts" class="alerts"></div>
+
+</section>
+
+
+<section class="card wide">
+
+ <h3>🧾 Data Sources / Status</h3>
+
+ <table>
+
+  <thead>
+   <tr>
+    <th>Source</th>
+    <th>Status</th>
+   </tr>
+  </thead>
+
+  <tbody id="sources"></tbody>
+
+ </table>
+
+ <p class="muted small">
+ TradingView chart is a visualization; exchange-derived price/derivatives values come from Binance.
+ Alternative.me requires attribution.
+ Farside ETF values are daily context, not tick-by-tick institutional order flow.
+ </p>
+
+</section>
+
+</div>
+</div>
+
+
 <script>
-const $=id=>document.getElementById(id);let soundOn=true,lastAlertKey='',alerts=JSON.parse(localStorage.getItem('btc_engine_alerts')||'[]');
-function money(x){return Number.isFinite(Number(x))?'$'+Number(x).toLocaleString(undefined,{maximumFractionDigits:2}):'--'}function num(x,d=2){return Number.isFinite(Number(x))?Number(x).toFixed(d):'--'}function pct(x){return x==null?'--':(Number(x)>=0?'+':'')+Number(x).toFixed(2)+'%'}
-function beep(){if(!soundOn)return;try{const c=new(window.AudioContext||window.webkitAudioContext)(),o=c.createOscillator(),g=c.createGain();o.frequency.value=880;g.gain.value=.07;o.connect(g);g.connect(c.destination);o.start();o.stop(c.currentTime+.18)}catch{}}
-function save(){localStorage.setItem('btc_engine_alerts',JSON.stringify(alerts));renderAlerts()}function addAlert(title,detail,key){if(key===lastAlertKey)return;alerts.unshift({id:Date.now(),title,detail,read:false,time:new Date().toLocaleString('en-IN')});alerts=alerts.slice(0,150);lastAlertKey=key;save();beep()}
-function renderAlerts(){$('alertCount').textContent=alerts.filter(x=>!x.read).length;$('alerts').innerHTML=alerts.length?alerts.map(a=>`<div class="alert ${a.read?'':'unread'}" onclick="readAlert(${a.id})"><span class="pill">${a.read?'पठित':'अपठित'}</span> <b>${a.title}</b><br><span class="muted small">${a.time}</span><br>${a.detail}</div>`).join(''):'No alerts yet.'}function readAlert(id){const a=alerts.find(x=>x.id===id);if(a){a.read=true;save()}}$('clear').onclick=()=>{alerts=[];save()};$('markRead').onclick=()=>{alerts.forEach(x=>x.read=true);save()};$('sound').onclick=()=>{soundOn=!soundOn;$('sound').textContent=soundOn?'🔊 ON':'🔇 OFF';if(soundOn)beep()};renderAlerts();
-function chart(){new TradingView.widget({autosize:true,symbol:'BINANCE:BTCUSDT',interval:$('tf').value,timezone:'Asia/Kolkata',theme:'dark',style:'1',locale:'en',enable_publishing:false,hide_top_toolbar:false,hide_legend:false,allow_symbol_change:false,studies:['RSI@tv-basicstudies','Volume@tv-basicstudies','VWAP@tv-basicstudies'],container_id:'tv_chart'})}chart();$('refreshChart').onclick=chart;$('tf').onchange=chart;
-function render(d){$('price').textContent=money(d.price);$('change').textContent=pct(d.change);$('change').className=d.change>=0?'up':'down';$('live').textContent=d.stream?.connected?'LIVE':'RECONNECTING';$('live').className='pill '+(d.stream?.connected?'green':'yellow');$('mprice').textContent=money(d.price);$('mvol').textContent=money(d.volume24h);$('mrsi').textContent=num(d.technical.rsi);$('vwap').textContent=money(d.technical.vwap);$('ema20').textContent=money(d.technical.ema20);$('ema50').textContent=money(d.technical.ema50);$('atr').textContent=money(d.technical.atr);$('trend5').textContent=d.technical.trend;$('trend15').textContent=d.technical15.trend;
-const s=d.signal;$('verdict').textContent=s.label;$('score').textContent=s.score;$('conf').textContent='Confidence '+s.confidence;$('coverage').textContent='Coverage '+s.coverage+'%';$('entry').textContent=money(s.entry);$('sl').textContent=money(s.sl);$('t1').textContent=money(s.target1);$('t2').textContent=money(s.target2);$('hold').textContent=s.holding;$('decision').textContent=s.decision;$('reasons').textContent='मुख्य कारण: '+s.reasons.join(' • ');
-$('fprice').textContent=num(s.factors.price);$('frsi').textContent=num(s.factors.rsi);$('fema').textContent=num(s.factors.ema);$('fvol').textContent=num(s.factors.volume);$('foi').textContent=num(s.factors.oi);$('ffund').textContent=num(s.factors.funding);$('fliq').textContent=num(s.factors.liq);$('flarge').textContent=num(s.factors.large);$('fetf').textContent=num(s.factors.etf);$('fmacro').textContent=num(s.factors.macro);$('ffg').textContent=num(s.factors.fg);const inst=Math.round((Number(s.factors.large)||50)*.35+(Number(s.factors.etf)||50)*.30+(Number(s.factors.oi)||50)*.20+(Number(s.factors.liq)||50)*.15);$('institutional').textContent=inst+' /100';$('instBox').className=inst>=65?'goodbox':inst<=35?'badbox':'yellow';$('instBox').textContent=inst>=65?'🟢 Institutional Buying Pressure Proxy: '+inst+'/100':inst<=35?'🔴 Institutional Selling Pressure Proxy: '+inst+'/100':'🟡 Institutional Flow Mixed: '+inst+'/100';
-$('oi').innerHTML=(d.oi||[]).map(x=>`<tr><td>${x.tf}</td><td>${money(x.oi)}</td><td>${pct(x.change)}</td><td>${money(x.volume)}</td><td>${pct(x.volumeChange)}</td></tr>`).join('');$('markets').innerHTML=Object.entries(d.markets||{}).map(([k,v])=>`<tr><td>${k}</td><td>${num(v.last)}</td><td>${pct(v.change)}</td></tr>`).join('');$('sessions').innerHTML=Object.entries(d.sessions||{}).map(([k,v])=>`<div>${k}</div><div class="${v==='OPEN'?'green':'muted'}">${v}</div>`).join('');$('sessionNote').textContent=d.sessions?.note||'';
-$('liqTotal').textContent=money(d.liquidation?.total1h);$('liqLong').textContent=money(d.liquidation?.long1h);$('liqShort').textContent=money(d.liquidation?.short1h);$('liqBias').textContent=d.liquidation?.bias||'--';$('funding').textContent=num((d.funding?.rate||0)*100,4)+'%';$('ls').textContent=d.longShort?num(d.longShort.ratio,2):'--';
-$('sourceBtns').innerHTML=(d.sourceLinks||[]).map(x=>`<a href="${x.url}" target="_blank" rel="noopener">${x.name}</a>`).join('');$('news').innerHTML=(d.news||[]).map(n=>`<div class="alert"><b>[${n.source}]</b> <a href="${n.link}" target="_blank" rel="noopener">${n.title}</a></div>`).join('')||'News unavailable — source buttons above remain available.';$('sources').innerHTML=(d.sources||[]).map(x=>`<tr><td>${x.name}</td><td>${x.status}</td></tr>`).join('');
-$('indexTicker').innerHTML=Object.entries(d.markets||{}).map(([k,v])=>`<span><b>${k}</b> ${num(v.last)} <em class="${v.change>=0?'green':'red'}">${pct(v.change)}</em></span>`).join('');if(s.direction!=='WAIT'&&s.score!==null)addAlert(s.label,`Score ${s.score}/100 • Confidence ${s.confidence} • Entry ${money(s.entry)} • SL ${money(s.sl)} • T1 ${money(s.target1)} • T2 ${money(s.target2)}`,s.direction+'-'+Math.floor(Date.now()/60000));}
-async function update(){try{const r=await fetch('/api/dashboard',{cache:'no-store'}),d=await r.json();if(r.ok)render(d);else $('verdict').textContent='DATA ERROR: '+(d.error||r.status)}catch(e){$('verdict').textContent='BACKEND OFFLINE';$('decision').textContent='Online V4 backend से connection नहीं मिला. कुछ सेकंड बाद पुनः प्रयास होगा.'}}update();setInterval(update,10000);
-function countdown(){const n=new Date();const targets=[{name:'India',h:9,m:15},{name:'UK',h:13,m:30},{name:'USA',h:19,m:0},{name:'China',h:7,m:0}];let best=null;for(const x of targets){let t=new Date(n);t.setHours(x.h,x.m,0,0);if(t<=n)t.setDate(t.getDate()+1);let ms=t-n;if(!best||ms<best.ms)best={...x,ms}}let s=Math.floor(best.ms/1000),h=Math.floor(s/3600);s%=3600;let m=Math.floor(s/60);s%=60;$('countdown').textContent=`${best.name}: ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`}setInterval(countdown,1000);countdown();
-$('openMusic').onclick=()=>{const v=$('musicSelect').value;if(v&&v!=='PLUG')window.open(v,'_blank','noopener')};
-</script></body></html>
+
+const $ = id => document.getElementById(id);
+
+let soundOn = true;
+let lastAlertKey = '';
+
+let alerts = JSON.parse(
+ localStorage.getItem('btc_engine_alerts') || '[]'
+);
+
+
+/* =========================
+   API CONFIGURATION
+========================= */
+
+const API_BASE = window.location.origin;
+
+const DASHBOARD_API =
+ API_BASE + '/api/dashboard';
+
+const HEALTH_API =
+ API_BASE + '/api/health';
+
+const PRICE_API =
+ API_BASE + '/api/price';
+
+
+/* =========================
+   FORMATTERS
+========================= */
+
+function money(x){
+
+ const n = Number(x);
+
+ return Number.isFinite(n)
+  ? '$' + n.toLocaleString(undefined,{
+      maximumFractionDigits:2
+    })
+  : '--';
+}
+
+
+function num(x,d=2){
+
+ const n = Number(x);
+
+ return Number.isFinite(n)
+  ? n.toFixed(d)
+  : '--';
+}
+
+
+function pct(x){
+
+ if(x === null || x === undefined)
+  return '--';
+
+ const n = Number(x);
+
+ if(!Number.isFinite(n))
+  return '--';
+
+ return (n >= 0 ? '+' : '') +
+        n.toFixed(2) +
+        '%';
+}
+
+
+/* =========================
+   SOUND
+========================= */
+
+function beep(){
+
+ if(!soundOn) return;
+
+ try{
+
+  const c =
+   new(window.AudioContext ||
+       window.webkitAudioContext)();
+
+  const o =
+   c.createOscillator();
+
+  const g =
+   c.createGain();
+
+  o.frequency.value = 880;
+
+  g.gain.value = .07;
+
+  o.connect(g);
+
+  g.connect(c.destination);
+
+  o.start();
+
+  o.stop(c.currentTime + .18);
+
+ }catch(e){}
+
+}
+
+
+/* =========================
+   ALERT SYSTEM
+========================= */
+
+function save(){
+
+ localStorage.setItem(
+  'btc_engine_alerts',
+  JSON.stringify(alerts)
+ );
+
+ renderAlerts();
+}
+
+
+function addAlert(title,detail,key){
+
+ if(key === lastAlertKey)
+  return;
+
+ alerts.unshift({
+  id:Date.now(),
+  title,
+  detail,
+  read:false,
+  time:new Date().toLocaleString('en-IN')
+ });
+
+ alerts = alerts.slice(0,150);
+
+ lastAlertKey = key;
+
+ save();
+
+ beep();
+}
+
+
+function renderAlerts(){
+
+ $('alertCount').textContent =
+  alerts.filter(x => !x.read).length;
+
+ $('alerts').innerHTML =
+  alerts.length
+   ? alerts.map(a => `
+      <div class="alert ${a.read?'':'unread'}"
+           onclick="readAlert(${a.id})">
+
+       <span class="pill">
+        ${a.read?'पठित':'अपठित'}
+       </span>
+
+       <b>${a.title}</b>
+
+       <br>
+
+       <span class="muted small">
+        ${a.time}
+       </span>
+
+       <br>
+
+       ${a.detail}
+
+      </div>
+     `).join('')
+   : 'No alerts yet.';
+}
+
+
+function readAlert(id){
+
+ const a = alerts.find(x => x.id === id);
+
+ if(a){
+
+  a.read = true;
+
+  save();
+ }
+}
+
+
+$('clear').onclick = () => {
+
+ alerts = [];
+
+ save();
+
+};
+
+
+$('markRead').onclick = () => {
+
+ alerts.forEach(x => x.read = true);
+
+ save();
+
+};
+
+
+$('sound').onclick = () => {
+
+ soundOn = !soundOn;
+
+ $('sound').textContent =
+  soundOn ? '🔊 ON' : '🔇 OFF';
+
+ if(soundOn)
+  beep();
+
+};
+
+
+renderAlerts();
+
+
+/* =========================
+   TRADINGVIEW
+========================= */
+
+function chart(){
+
+ if(typeof TradingView === 'undefined'){
+
+  $('connectionInfo').textContent =
+   'TradingView script अभी load नहीं हुआ।';
+
+  return;
+ }
+
+ $('tv_chart').innerHTML = '';
+
+ new TradingView.widget({
+
+  autosize:true,
+
+  symbol:'BINANCE:BTCUSDT',
+
+  interval:$('tf').value,
+
+  timezone:'Asia/Kolkata',
+
+  theme:'dark',
+
+  style:'1',
+
+  locale:'en',
+
+  enable_publishing:false,
+
+  hide_top_toolbar:false,
+
+  hide_legend:false,
+
+  allow_symbol_change:false,
+
+  studies:[
+   'RSI@tv-basicstudies',
+   'Volume@tv-basicstudies',
+   'VWAP@tv-basicstudies'
+  ],
+
+  container_id:'tv_chart'
+
+ });
+}
+
+
+window.addEventListener(
+ 'load',
+ () => setTimeout(chart,500)
+);
+
+
+$('refreshChart').onclick = chart;
+
+$('tf').onchange = chart;
+
+
+/* =========================
+   CONNECTION STATUS
+========================= */
+
+function setConnection(status,message){
+
+ const live = $('live');
+
+ if(status === 'LIVE'){
+
+  live.textContent = 'LIVE';
+
+  live.className = 'pill green';
+
+  $('connectionInfo').textContent =
+   '🟢 Backend LIVE — /api/dashboard connected';
+
+  $('connectionInfo').className =
+   'statusbox goodbox';
+
+ }
+
+ else if(status === 'ERROR'){
+
+  live.textContent = 'ERROR';
+
+  live.className = 'pill red';
+
+  $('connectionInfo').textContent =
+   '🔴 Backend error: ' + message;
+
+  $('connectionInfo').className =
+   'statusbox badbox';
+
+ }
+
+ else{
+
+  live.textContent = 'CONNECTING';
+
+  live.className = 'pill yellow';
+
+  $('connectionInfo').textContent =
+   '🟡 Backend से connection बनाया जा रहा है...';
+
+  $('connectionInfo').className =
+   'statusbox';
+
+ }
+}
+
+
+/* =========================
+   FETCH WITH TIMEOUT
+========================= */
+
+async function fetchJSON(url){
+
+ const controller =
+  new AbortController();
+
+ const timer =
+  setTimeout(
+   () => controller.abort(),
+   15000
+  );
+
+ try{
+
+  const response =
+   await fetch(
+    url + '?_=' + Date.now(),
+    {
+     method:'GET',
+     cache:'no-store',
+     headers:{
+      'Accept':'application/json'
+     },
+     signal:controller.signal
+    }
+   );
+
+  const text =
+   await response.text();
+
+  let data;
+
+  try{
+   data = JSON.parse(text);
+  }
+  catch(e){
+
+   throw new Error(
+    'Server ने JSON के बजाय अन्य response दिया'
+   );
+  }
+
+  if(!response.ok){
+
+   throw new Error(
+    data.error ||
+    data.message ||
+    'HTTP ' + response.status
+   );
+  }
+
+  return data;
+
+ }
+ finally{
+
+  clearTimeout(timer);
+
+ }
+}
+
+
+/* =========================
+   RENDER DASHBOARD
+========================= */
+
+function render(d){
+
+ if(!d || typeof d !== 'object')
+  throw new Error('Invalid dashboard data');
+
+ const technical =
+  d.technical || {};
+
+ const technical15 =
+  d.technical15 || {};
+
+ const s =
+  d.signal || {};
+
+ const factors =
+  s.factors || {};
+
+
+ $('price').textContent =
+  money(d.price);
+
+ $('change').textContent =
+  pct(d.change);
+
+ $('change').className =
+  Number(d.change) >= 0
+   ? 'up'
+   : 'down';
+
+
+ $('live').textContent =
+  d.stream?.connected
+   ? 'LIVE'
+   : 'RECONNECTING';
+
+ $('live').className =
+  'pill ' +
+  (
+   d.stream?.connected
+    ? 'green'
+    : 'yellow'
+  );
+
+
+ $('mprice').textContent =
+  money(d.price);
+
+ $('mvol').textContent =
+  money(d.volume24h);
+
+ $('mrsi').textContent =
+  num(technical.rsi);
+
+ $('vwap').textContent =
+  money(technical.vwap);
+
+ $('ema20').textContent =
+  money(technical.ema20);
+
+ $('ema50').textContent =
+  money(technical.ema50);
+
+ $('atr').textContent =
+  money(technical.atr);
+
+ $('trend5').textContent =
+  technical.trend || '--';
+
+ $('trend15').textContent =
+  technical15.trend || '--';
+
+
+ /* SIGNAL */
+
+ $('verdict').textContent =
+  s.label || '🟡 WAIT';
+
+ $('score').textContent =
+  s.score ?? '--';
+
+ $('conf').textContent =
+  'Confidence ' +
+  (s.confidence ?? '--');
+
+ $('coverage').textContent =
+  'Coverage ' +
+  (s.coverage ?? '--') +
+  '%';
+
+
+ $('entry').textContent =
+  money(s.entry);
+
+ $('sl').textContent =
+  money(s.sl);
+
+ $('t1').textContent =
+  money(s.target1);
+
+ $('t2').textContent =
+  money(s.target2);
+
+ $('hold').textContent =
+  s.holding || '--';
+
+ $('decision').textContent =
+  s.decision ||
+  'Decision support only — guaranteed profit नहीं।';
+
+ $('reasons').textContent =
+  Array.isArray(s.reasons)
+   ? 'मुख्य कारण: ' +
+     s.reasons.join(' • ')
+   : 'मुख्य कारण: --';
+
+
+ /* FACTORS */
+
+ $('fprice').textContent =
+  num(factors.price);
+
+ $('frsi').textContent =
+  num(factors.rsi);
+
+ $('fema').textContent =
+  num(factors.ema);
+
+ $('fvol').textContent =
+  num(factors.volume);
+
+ $('foi').textContent =
+  num(factors.oi);
+
+ $('ffund').textContent =
+  num(factors.funding);
+
+ $('fliq').textContent =
+  num(factors.liq);
+
+ $('flarge').textContent =
+  num(factors.large);
+
+ $('fetf').textContent =
+  num(factors.etf);
+
+ $('fmacro').textContent =
+  num(factors.macro);
+
+ $('ffg').textContent =
+  num(factors.fg);
+
+
+ /* INSTITUTIONAL PROXY */
+
+ const inst = Math.round(
+
+  (Number(factors.large) || 50) * .35 +
+
+  (Number(factors.etf) || 50) * .30 +
+
+  (Number(factors.oi) || 50) * .20 +
+
+  (Number(factors.liq) || 50) * .15
+
+ );
+
+
+ $('institutional').textContent =
+  inst + ' /100';
+
+
+ $('instBox').className =
+  inst >= 65
+   ? 'goodbox'
+   : inst <= 35
+     ? 'badbox'
+     : 'statusbox';
+
+
+ $('instBox').textContent =
+
+  inst >= 65
+
+   ? '🟢 Institutional Buying Pressure Proxy: ' +
+     inst + '/100'
+
+   : inst <= 35
+
+     ? '🔴 Institutional Selling Pressure Proxy: ' +
+       inst + '/100'
+
+     : '🟡 Institutional Flow Mixed: ' +
+       inst + '/100';
+
+
+ /* OPEN INTEREST */
+
+ $('oi').innerHTML =
+  (d.oi || [])
+   .map(x => `
+
+    <tr>
+
+     <td>${x.tf ?? '--'}</td>
+
+     <td>${money(x.oi)}</td>
+
+     <td>${pct(x.change)}</td>
+
+     <td>${money(x.volume)}</td>
+
+     <td>${pct(x.volumeChange)}</td>
+
+    </tr>
+
+   `)
+   .join('');
+
+
+ /* MARKETS */
+
+ $('markets').innerHTML =
+  Object.entries(d.markets || {})
+   .map(([k,v]) => `
+
+    <tr>
+
+     <td>${k}</td>
+
+     <td>${num(v?.last)}</td>
+
+     <td>${pct(v?.change)}</td>
+
+    </tr>
+
+   `)
+   .join('');
+
+
+ /* SESSIONS */
+
+ $('sessions').innerHTML =
+  Object.entries(d.sessions || {})
+   .filter(([k]) => k !== 'note')
+   .map(([k,v]) => `
+
+    <div>${k}</div>
+
+    <div class="${
+      v === 'OPEN'
+       ? 'green'
+       : 'muted'
+    }">
+     ${v}
+    </div>
+
+   `)
+   .join('');
+
+
+ $('sessionNote').textContent =
+  d.sessions?.note || '';
+
+
+ /* LIQUIDATION */
+
+ $('liqTotal').textContent =
+  money(d.liquidation?.total1h);
+
+ $('liqLong').textContent =
+  money(d.liquidation?.long1h);
+
+ $('liqShort').textContent =
+  money(d.liquidation?.short1h);
+
+ $('liqBias').textContent =
+  d.liquidation?.bias || '--';
+
+
+ const fundingRate =
+  d.funding?.rate;
+
+ $('funding').textContent =
+  fundingRate == null
+   ? '--'
+   : num(
+      Number(fundingRate) * 100,
+      4
+     ) + '%';
+
+
+ $('ls').textContent =
+  d.longShort
+   ? num(d.longShort.ratio,2)
+   : '--';
+
+
+ /* NEWS */
+
+ $('sourceBtns').innerHTML =
+  (d.sourceLinks || [])
+   .map(x => `
+
+    <a href="${x.url}"
+       target="_blank"
+       rel="noopener">
+       ${x.name}
+    </a>
+
+   `)
+   .join('');
+
+
+ $('news').innerHTML =
+  (d.news || [])
+   .map(n => `
+
+    <div class="alert">
+
+     <b>[${n.source}]</b>
+
+     <a href="${n.link}"
+        target="_blank"
+        rel="noopener">
+        ${n.title}
+     </a>
+
+    </div>
+
+   `)
+   .join('')
+
+   ||
+
+   'News unavailable — source buttons above remain available.';
+
+
+ /* SOURCES */
+
+ $('sources').innerHTML =
+  (d.sources || [])
+   .map(x => `
+
+    <tr>
+
+     <td>${x.name}</td>
+
+     <td>${x.status}</td>
+
+    </tr>
+
+   `)
+   .join('');
+
+
+ /* TICKER */
+
+ $('indexTicker').innerHTML =
+  Object.entries(d.markets || {})
+   .map(([k,v]) => `
+
+    <span>
+
+     <b>${k}</b>
+
+     ${num(v?.last)}
+
+     <em class="${
+       Number(v?.change) >= 0
+        ? 'green'
+        : 'red'
+     }">
+
+      ${pct(v?.change)}
+
+     </em>
+
+    </span>
+
+   `)
+   .join('');
+
+
+ /* CONNECTION */
+
+ setConnection(
+  d.stream?.connected
+   ? 'LIVE'
+   : 'CONNECTING',
+  ''
+ );
+
+
+ /* ALERT */
+
+ if(
+  s.direction &&
+  s.direction !== 'WAIT' &&
+  s.score !== null &&
+  s.score !== undefined
+ ){
+
+  addAlert(
+
+   s.label || s.direction,
+
+   `Score ${s.score}/100 • ` +
+   `Confidence ${s.confidence ?? '--'} • ` +
+   `Entry ${money(s.entry)} • ` +
+   `SL ${money(s.sl)} • ` +
+   `T1 ${money(s.target1)} • ` +
+   `T2 ${money(s.target2)}`,
+
+   s.direction +
+   '-' +
+   Math.floor(Date.now()/60000)
+
+  );
+
+ }
+
+}
+
+
+/* =========================
+   MAIN UPDATE
+========================= */
+
+let updating = false;
+
+
+async function update(){
+
+ if(updating)
+  return;
+
+ updating = true;
+
+ try{
+
+  setConnection(
+   'CONNECTING',
+   ''
+  );
+
+  const d =
+   await fetchJSON(
+    DASHBOARD_API
+   );
+
+  render(d);
+
+ }
+ catch(e){
+
+  console.error(
+   'Dashboard API error:',
+   e
+  );
+
+  $('verdict').textContent =
+   '⚠️ DATA CONNECTION ERROR';
+
+  $('decision').textContent =
+   'Dashboard data प्राप्त नहीं हुआ। Backend को पुनः प्रयास किया जा रहा है।';
+
+  setConnection(
+   'ERROR',
+   e.message || 'Unknown error'
+  );
+
+ }
+ finally{
+
+  updating = false;
+
+ }
+
+}
+
+
+/* FIRST LOAD */
+
+update();
+
+
+/* EVERY 10 SECONDS */
+
+setInterval(
+ update,
+ 10000
+);
+
+
+/* =========================
+   COUNTDOWN
+========================= */
+
+function countdown(){
+
+ const n = new Date();
+
+ const targets = [
+
+  {
+   name:'India',
+   h:9,
+   m:15
+  },
+
+  {
+   name:'UK',
+   h:13,
+   m:30
+  },
+
+  {
+   name:'USA',
+   h:19,
+   m:0
+  },
+
+  {
+   name:'China',
+   h:7,
+   m:0
+  }
+
+ ];
+
+ let best = null;
+
+ for(const x of targets){
+
+  let t =
+   new Date(n);
+
+  t.setHours(
+   x.h,
+   x.m,
+   0,
+   0
+  );
+
+  if(t <= n)
+   t.setDate(
+    t.getDate()+1
+   );
+
+  const ms =
+   t-n;
+
+  if(
+   !best ||
+   ms < best.ms
+  ){
+
+   best = {
+    ...x,
+    ms
+   };
+
+  }
+
+ }
+
+ let s =
+  Math.floor(
+   best.ms / 1000
+  );
+
+ let h =
+  Math.floor(
+   s / 3600
+  );
+
+ s %= 3600;
+
+ let m =
+  Math.floor(
+   s / 60
+  );
+
+ s %= 60;
+
+ $('countdown').textContent =
+  `${best.name}: ` +
+  `${String(h).padStart(2,'0')}:` +
+  `${String(m).padStart(2,'0')}:` +
+  `${String(s).padStart(2,'0')}`;
+
+}
+
+setInterval(
+ countdown,
+ 1000
+);
+
+countdown();
+
+
+/* =========================
+   MUSIC
+========================= */
+
+$('openMusic').onclick =
+ () => {
+
+  const v =
+   $('musicSelect').value;
+
+  if(
+   v &&
+   v !== 'PLUG'
+  ){
+
+   window.open(
+    v,
+    '_blank',
+    'noopener'
+   );
+
+  }
+
+ };
+
+
+/* =========================
+   DEBUG HEALTH CHECK
+========================= */
+
+async function healthCheck(){
+
+ try{
+
+  const h =
+   await fetchJSON(
+    HEALTH_API
+   );
+
+  console.log(
+   'BTC ENGINE HEALTH:',
+   h
+  );
+
+ }
+ catch(e){
+
+  console.warn(
+   'Health check failed:',
+   e.message
+  );
+
+ }
+
+}
+
+
+healthCheck();
+
+</script>
+
+</body>
+</html>
