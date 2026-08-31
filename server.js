@@ -10,132 +10,81 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.use(express.static(
-  path.join(__dirname, 'frontend')
-));
+app.use(
+  express.static(
+    path.join(__dirname, 'frontend')
+  )
+);
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 
 const SYMBOL = 'BTCUSDT';
 
-const SPOT_BASES = [
-  'https://api.binance.com',
-  'https://data-api.binance.vision'
-];
+const PROVIDERS = {
+  bybit: 'https://api.bybit.com',
+  binance: 'https://api.binance.com',
+  binanceVision: 'https://data-api.binance.vision'
+};
 
-const FUTURES_BASES = [
-  'https://fapi.binance.com'
-];
+const state = {
+  startedAt: Date.now(),
 
-/* =========================================================
-   RUNTIME STATE
-========================================================= */
+  stream: {
+    connected: false,
+    lastMessage: null,
+    reconnects: 0,
+    provider: 'Bybit'
+  },
 
-const cache = new Map();
-const previous = new Map();
-
-let streamConnected = false;
-let streamLastMessage = 0;
-let streamReconnects = 0;
-
-let ws = null;
-let wsTimer = null;
+  last: null,
+  lastSignalKey: '',
+  history: new Map()
+};
 
 
 /* =========================================================
    BASIC HELPERS
 ========================================================= */
 
-function finite(x) {
+async function fetchJson(url, timeout = 12000) {
 
-  const n = Number(x);
+  const controller = new AbortController();
 
-  return Number.isFinite(n)
-    ? n
-    : null;
-}
-
-
-function clamp(n, min, max) {
-
-  return Math.max(
-    min,
-    Math.min(max, n)
+  const timer = setTimeout(
+    () => controller.abort(),
+    timeout
   );
-}
-
-
-function pctChange(current, old) {
-
-  if (
-    !Number.isFinite(current) ||
-    !Number.isFinite(old) ||
-    old === 0
-  ) {
-    return null;
-  }
-
-  return ((current - old) / old) * 100;
-}
-
-
-/* =========================================================
-   FETCH JSON WITH TIMEOUT
-========================================================= */
-
-async function fetchJSON(
-  url,
-  options = {},
-  timeoutMs = 12000
-) {
-
-  const controller =
-    new AbortController();
-
-  const timer =
-    setTimeout(
-      () => controller.abort(),
-      timeoutMs
-    );
 
   try {
 
-    const response =
-      await fetch(
-        url,
-        {
-          ...options,
+    const response = await fetch(
+      url,
+      {
+        method: 'GET',
 
-          signal:
-            controller.signal,
+        headers: {
+          accept: 'application/json',
+          'user-agent':
+            'BTC-AI-Scalping-Engine/4.0'
+        },
 
-          headers: {
-            'Accept':
-              'application/json',
+        signal: controller.signal
+      }
+    );
 
-            'User-Agent':
-              'BTC-AI-SCALPING-ENGINE-V5/1.0',
-
-            ...(options.headers || {})
-          }
-        }
-      );
-
-    const text =
-      await response.text();
+    const text = await response.text();
 
     let data;
 
     try {
 
-      data =
-        JSON.parse(text);
+      data = JSON.parse(text);
 
-    } catch {
+    } catch (e) {
 
       throw new Error(
-        `Non-JSON response HTTP ${response.status}`
+        `Non-JSON response from ${new URL(url).hostname}`
       );
 
     }
@@ -143,8 +92,6 @@ async function fetchJSON(
     if (!response.ok) {
 
       throw new Error(
-        data?.msg ||
-        data?.message ||
         `HTTP ${response.status}`
       );
 
@@ -157,230 +104,80 @@ async function fetchJSON(
     clearTimeout(timer);
 
   }
-
 }
 
 
-/* =========================================================
-   TRY MULTIPLE BINANCE ENDPOINTS
-========================================================= */
+function n(value, fallback = null) {
 
-async function firstWorking(
-  bases,
-  endpoint
-) {
+  const x = Number(value);
 
-  let lastError = null;
+  return Number.isFinite(x)
+    ? x
+    : fallback;
+}
 
-  for (const base of bases) {
 
-    try {
+function clamp(value, min = 0, max = 100) {
 
-      const data =
-        await fetchJSON(
-          base + endpoint
-        );
-
-      return {
-        data,
-        base
-      };
-
-    } catch (error) {
-
-      lastError = error;
-
-    }
-
-  }
-
-  throw (
-    lastError ||
-    new Error(
-      'No endpoint available'
-    )
+  return Math.max(
+    min,
+    Math.min(max, value)
   );
 
 }
 
 
-/* =========================================================
-   CACHE
-========================================================= */
+function avg(values) {
 
-function cacheSet(
-  key,
-  value,
-  ttlMs
-) {
-
-  cache.set(
-    key,
-    {
-      value,
-      expires:
-        Date.now() + ttlMs
-    }
-  );
+  return values.length
+    ? values.reduce(
+        (a, b) => a + b,
+        0
+      ) / values.length
+    : null;
 
 }
 
 
-function cacheGet(key) {
-
-  const item =
-    cache.get(key);
-
-  if (!item)
-    return null;
+function pct(current, previous) {
 
   if (
-    item.expires <
-    Date.now()
+    current == null ||
+    previous == null ||
+    previous === 0
   ) {
-
-    cache.delete(key);
-
     return null;
   }
 
-  return item.value;
+  return (
+    (current - previous) /
+    previous
+  ) * 100;
+
+}
+
+
+function nowISO() {
+
+  return new Date().toISOString();
 
 }
 
 
 /* =========================================================
-   BINANCE SPOT 24H
+   TECHNICAL INDICATORS
 ========================================================= */
 
-async function spot24h() {
+function ema(values, period) {
 
-  const cached =
-    cacheGet('spot24h');
-
-  if (cached)
-    return cached;
-
-  const response =
-    await firstWorking(
-      SPOT_BASES,
-      `/api/v3/ticker/24hr?symbol=${SYMBOL}`
-    );
-
-  const data =
-    response.data;
-
-  const result = {
-
-    price:
-      finite(data.lastPrice),
-
-    change:
-      finite(data.priceChangePercent),
-
-    volume24h:
-      finite(data.volume),
-
-    quoteVolume24h:
-      finite(data.quoteVolume),
-
-    source:
-      'Binance Spot'
-
-  };
-
-  cacheSet(
-    'spot24h',
-    result,
-    2500
-  );
-
-  return result;
-
-}
-
-
-/* =========================================================
-   BINANCE CANDLES
-========================================================= */
-
-async function klines(
-  interval,
-  limit = 120
-) {
-
-  const key =
-    `kline-${interval}`;
-
-  const cached =
-    cacheGet(key);
-
-  if (cached)
-    return cached;
-
-  const response =
-    await firstWorking(
-      SPOT_BASES,
-
-      `/api/v3/klines` +
-      `?symbol=${SYMBOL}` +
-      `&interval=${interval}` +
-      `&limit=${limit}`
-    );
-
-  const rows =
-    response.data.map(
-      x => ({
-
-        time:
-          Number(x[0]),
-
-        open:
-          Number(x[1]),
-
-        high:
-          Number(x[2]),
-
-        low:
-          Number(x[3]),
-
-        close:
-          Number(x[4]),
-
-        volume:
-          Number(x[5])
-
-      })
-    );
-
-  cacheSet(
-    key,
-    rows,
-    4500
-  );
-
-  return rows;
-
-}
-
-
-/* =========================================================
-   EMA
-========================================================= */
-
-function ema(
-  values,
-  period
-) {
-
-  if (!values.length)
+  if (!values.length) {
     return null;
+  }
 
-  const k =
+  const multiplier =
     2 / (period + 1);
 
-  let result =
-    values[0];
+  let result = values[0];
 
   for (
     let i = 1;
@@ -389,8 +186,8 @@ function ema(
   ) {
 
     result =
-      values[i] * k +
-      result * (1 - k);
+      values[i] * multiplier +
+      result * (1 - multiplier);
 
   }
 
@@ -399,21 +196,12 @@ function ema(
 }
 
 
-/* =========================================================
-   RSI
-========================================================= */
-
-function rsi(
-  values,
-  period = 14
-) {
+function rsi(values, period = 14) {
 
   if (
     values.length <= period
   ) {
-
     return null;
-
   }
 
   let gain = 0;
@@ -425,21 +213,26 @@ function rsi(
     i++
   ) {
 
-    const diff =
+    const difference =
       values[i] -
       values[i - 1];
 
-    if (diff >= 0)
-      gain += diff;
-    else
-      loss -= diff;
+    if (difference >= 0) {
+
+      gain += difference;
+
+    } else {
+
+      loss -= difference;
+
+    }
 
   }
 
-  let avgGain =
+  let averageGain =
     gain / period;
 
-  let avgLoss =
+  let averageLoss =
     loss / period;
 
   for (
@@ -448,66 +241,55 @@ function rsi(
     i++
   ) {
 
-    const diff =
+    const difference =
       values[i] -
       values[i - 1];
 
-    const currentGain =
-      diff > 0
-        ? diff
-        : 0;
-
-    const currentLoss =
-      diff < 0
-        ? -diff
-        : 0;
-
-    avgGain =
+    averageGain =
       (
-        avgGain * (period - 1) +
-        currentGain
+        averageGain *
+          (period - 1) +
+        (difference > 0
+          ? difference
+          : 0)
       ) / period;
 
-    avgLoss =
+    averageLoss =
       (
-        avgLoss * (period - 1) +
-        currentLoss
+        averageLoss *
+          (period - 1) +
+        (difference < 0
+          ? -difference
+          : 0)
       ) / period;
 
   }
 
-  if (avgLoss === 0)
+  if (averageLoss === 0) {
+
     return 100;
 
-  const rs =
-    avgGain / avgLoss;
+  }
 
-  return (
-    100 -
-    (100 / (1 + rs))
-  );
+  const rs =
+    averageGain /
+    averageLoss;
+
+  return 100 -
+    (100 / (1 + rs));
 
 }
 
 
-/* =========================================================
-   ATR
-========================================================= */
-
-function atr(
-  rows,
-  period = 14
-) {
+function atr(rows, period = 14) {
 
   if (
     rows.length <= period
   ) {
-
     return null;
-
   }
 
-  const tr = [];
+  const trueRanges = [];
 
   for (
     let i = 1;
@@ -515,56 +297,44 @@ function atr(
     i++
   ) {
 
-    tr.push(
+    const high =
+      rows[i].high;
 
+    const low =
+      rows[i].low;
+
+    const previousClose =
+      rows[i - 1].close;
+
+    trueRanges.push(
       Math.max(
-
-        rows[i].high -
-        rows[i].low,
+        high - low,
 
         Math.abs(
-          rows[i].high -
-          rows[i - 1].close
+          high - previousClose
         ),
 
         Math.abs(
-          rows[i].low -
-          rows[i - 1].close
+          low - previousClose
         )
-
       )
-
     );
 
   }
 
-  const recent =
-    tr.slice(-period);
-
-  return (
-    recent.reduce(
-      (a, b) => a + b,
-      0
-    ) /
-    recent.length
+  return avg(
+    trueRanges.slice(-period)
   );
 
 }
 
 
-/* =========================================================
-   VWAP
-========================================================= */
-
-function vwap(rows) {
-
-  const recent =
-    rows.slice(-60);
+function sessionVWAP(rows) {
 
   let priceVolume = 0;
   let volume = 0;
 
-  for (const row of recent) {
+  for (const row of rows) {
 
     const typicalPrice =
       (
@@ -577,700 +347,492 @@ function vwap(rows) {
       typicalPrice *
       row.volume;
 
-    volume +=
-      row.volume;
+    volume += row.volume;
 
   }
 
-  if (!volume)
-    return null;
+  return volume
+    ? priceVolume / volume
+    : null;
+
+}
+
+
+/* =========================================================
+   BYBIT KLINE
+========================================================= */
+
+function parseBybitKlines(list) {
 
   return (
-    priceVolume /
-    volume
-  );
+    Array.isArray(list)
+      ? list
+      : []
+  )
+    .slice()
+    .reverse()
+    .map(row => ({
+
+      time: n(row[0]),
+
+      open: n(row[1]),
+
+      high: n(row[2]),
+
+      low: n(row[3]),
+
+      close: n(row[4]),
+
+      volume: n(row[5])
+
+    }))
+    .filter(row =>
+      [
+        row.open,
+        row.high,
+        row.low,
+        row.close,
+        row.volume
+      ].every(
+        value => value != null
+      )
+    );
 
 }
 
 
 /* =========================================================
-   TREND
+   BYBIT TICKER
 ========================================================= */
 
-function trend(rows) {
+async function bybitTicker() {
 
-  if (rows.length < 55)
-    return 'MIXED';
+  const url =
+    `${PROVIDERS.bybit}` +
+    `/v5/market/tickers` +
+    `?category=linear` +
+    `&symbol=${SYMBOL}`;
 
-  const closes =
-    rows.map(
-      x => x.close
+  const data =
+    await fetchJson(url);
+
+  const item =
+    data?.result?.list?.[0];
+
+  if (!item) {
+
+    throw new Error(
+      'Bybit ticker unavailable'
     );
-
-  const ema20Value =
-    ema(
-      closes,
-      20
-    );
-
-  const ema50Value =
-    ema(
-      closes,
-      50
-    );
-
-  const last =
-    closes.at(-1);
-
-  if (
-    last >
-    ema20Value &&
-    ema20Value >
-    ema50Value
-  ) {
-
-    return 'BULLISH';
 
   }
-
-  if (
-    last <
-    ema20Value &&
-    ema20Value <
-    ema50Value
-  ) {
-
-    return 'BEARISH';
-
-  }
-
-  return 'MIXED';
-
-}
-
-
-/* =========================================================
-   TECHNICAL PACKAGE
-========================================================= */
-
-function technical(rows) {
-
-  const closes =
-    rows.map(
-      x => x.close
-    );
 
   return {
 
-    rsi:
-      rsi(
-        closes,
-        14
-      ),
+    price:
+      n(item.lastPrice),
 
-    ema20:
-      ema(
-        closes,
-        20
-      ),
+    change:
+      n(item.price24hPcnt) * 100,
 
-    ema50:
-      ema(
-        closes,
-        50
-      ),
+    volume24h:
+      n(item.volume24h),
 
-    vwap:
-      vwap(rows),
-
-    atr:
-      atr(
-        rows,
-        14
-      ),
-
-    trend:
-      trend(rows),
-
-    high20:
-      Math.max(
-        ...rows
-          .slice(-20)
-          .map(x => x.high)
-      ),
-
-    low20:
-      Math.min(
-        ...rows
-          .slice(-20)
-          .map(x => x.low)
-      ),
-
-    last:
-      closes.at(-1)
-
-  };
-
-}
-
-
-/* =========================================================
-   BINANCE FUTURES
-========================================================= */
-
-async function futuresStats() {
-
-  const cached =
-    cacheGet(
-      'futuresStats'
-    );
-
-  if (cached)
-    return cached;
-
-  const [
-    premiumResult,
-    oiResult,
-    fundingResult,
-    longShortResult
-  ] =
-    await Promise.allSettled([
-
-      firstWorking(
-        FUTURES_BASES,
-
-        `/fapi/v1/premiumIndex` +
-        `?symbol=${SYMBOL}`
-      ),
-
-      firstWorking(
-        FUTURES_BASES,
-
-        `/fapi/v1/openInterest` +
-        `?symbol=${SYMBOL}`
-      ),
-
-      firstWorking(
-        FUTURES_BASES,
-
-        `/fapi/v1/fundingRate` +
-        `?symbol=${SYMBOL}` +
-        `&limit=1`
-      ),
-
-      firstWorking(
-        FUTURES_BASES,
-
-        `/futures/data/globalLongShortAccountRatio` +
-        `?symbol=${SYMBOL}` +
-        `&period=5m` +
-        `&limit=1`
-      )
-
-    ]);
-
-
-  const premium =
-    premiumResult.status === 'fulfilled'
-      ? premiumResult.value.data
-      : null;
-
-
-  const oi =
-    oiResult.status === 'fulfilled'
-      ? oiResult.value.data
-      : null;
-
-
-  const funding =
-    fundingResult.status === 'fulfilled'
-      ? fundingResult.value.data?.[0]
-      : null;
-
-
-  const longShort =
-    longShortResult.status === 'fulfilled'
-      ? longShortResult.value.data?.[0]
-      : null;
-
-
-  const result = {
-
-    markPrice:
-      finite(
-        premium?.markPrice
-      ),
-
-    indexPrice:
-      finite(
-        premium?.indexPrice
-      ),
+    turnover24h:
+      n(item.turnover24h),
 
     fundingRate:
-      finite(
-        premium?.lastFundingRate ??
-        funding?.fundingRate
-      ),
+      n(item.fundingRate),
 
     nextFundingTime:
-      premium?.nextFundingTime ??
-      null,
+      n(item.nextFundingTime),
 
-    oi:
-      finite(
-        oi?.openInterest
-      ),
+    markPrice:
+      n(item.markPrice),
 
-    longShortRatio:
-      finite(
-        longShort?.longShortRatio
-      ),
-
-    source:
-      'Binance Futures'
+    indexPrice:
+      n(item.indexPrice)
 
   };
 
+}
 
-  cacheSet(
-    'futuresStats',
-    result,
-    5000
+
+/* =========================================================
+   BYBIT KLINES
+========================================================= */
+
+async function bybitKlines(
+  interval = '5',
+  limit = 200
+) {
+
+  const url =
+    `${PROVIDERS.bybit}` +
+    `/v5/market/kline` +
+    `?category=linear` +
+    `&symbol=${SYMBOL}` +
+    `&interval=${interval}` +
+    `&limit=${limit}`;
+
+  const data =
+    await fetchJson(url);
+
+  return parseBybitKlines(
+    data?.result?.list
   );
 
+}
 
-  return result;
+
+/* =========================================================
+   BYBIT OPEN INTEREST
+========================================================= */
+
+async function bybitOI(
+  interval = '5min'
+) {
+
+  const url =
+    `${PROVIDERS.bybit}` +
+    `/v5/market/open-interest` +
+    `?category=linear` +
+    `&symbol=${SYMBOL}` +
+    `&intervalTime=${interval}` +
+    `&limit=50`;
+
+  const data =
+    await fetchJson(url);
+
+  return (
+    data?.result?.list || []
+  )
+    .slice()
+    .reverse()
+    .map(item => ({
+
+      time:
+        n(item.timestamp),
+
+      oi:
+        n(
+          item.singleOpenInterest ??
+          item.openInterest
+        )
+
+    }));
 
 }
 
 
 /* =========================================================
-   LIQUIDATIONS
+   BYBIT LONG SHORT
 ========================================================= */
 
-async function liquidationStats() {
+async function bybitLongShort() {
 
-  const cached =
-    cacheGet('liq');
+  const url =
+    `${PROVIDERS.bybit}` +
+    `/v5/market/account-ratio` +
+    `?category=linear` +
+    `&symbol=${SYMBOL}` +
+    `&period=5min` +
+    `&limit=1`;
 
-  if (cached)
-    return cached;
+  const data =
+    await fetchJson(url);
 
-  try {
+  const item =
+    data?.result?.list?.[0];
 
-    const response =
-      await firstWorking(
+  if (!item) {
 
-        FUTURES_BASES,
-
-        `/fapi/v1/allForceOrders` +
-        `?symbol=${SYMBOL}` +
-        `&limit=100`
-
-      );
-
-
-    const cutoff =
-      Date.now() -
-      60 * 60 * 1000;
-
-
-    let total = 0;
-    let long = 0;
-    let short = 0;
-
-
-    for (
-      const item of
-      (response.data || [])
-    ) {
-
-      if (
-        Number(item.time || 0) <
-        cutoff
-      ) {
-
-        continue;
-
-      }
-
-
-      const quantity =
-        Number(
-          item.origQty || 0
-        );
-
-      const price =
-        Number(
-          item.averagePrice ||
-          item.price ||
-          0
-        );
-
-
-      const value =
-        Math.abs(
-          quantity *
-          price
-        );
-
-
-      total += value;
-
-
-      if (
-        String(item.side)
-          .toUpperCase() ===
-        'SELL'
-      ) {
-
-        long += value;
-
-      }
-
-
-      if (
-        String(item.side)
-          .toUpperCase() ===
-        'BUY'
-      ) {
-
-        short += value;
-
-      }
-
-    }
-
-
-    const result = {
-
-      total1h:
-        total,
-
-      long1h:
-        long,
-
-      short1h:
-        short,
-
-      bias:
-        long >
-        short * 1.15
-
-          ? 'LONG LIQUIDATION HEAVY'
-
-          : short >
-            long * 1.15
-
-            ? 'SHORT LIQUIDATION HEAVY'
-
-            : 'BALANCED',
-
-      source:
-        'Binance Futures'
-
-    };
-
-
-    cacheSet(
-      'liq',
-      result,
-      15000
-    );
-
-
-    return result;
-
-
-  } catch {
-
-    return {
-
-      total1h:
-        null,
-
-      long1h:
-        null,
-
-      short1h:
-        null,
-
-      bias:
-        'UNAVAILABLE',
-
-      source:
-        'Unavailable'
-
-    };
+    return null;
 
   }
 
-}
+  const buyRatio =
+    n(item.buyRatio);
 
+  const sellRatio =
+    n(item.sellRatio);
 
-/* =========================================================
-   FEAR & GREED
-========================================================= */
+  return {
 
-async function fearGreed() {
+    buyRatio,
 
-  const cached =
-    cacheGet('fg');
+    sellRatio,
 
-  if (cached)
-    return cached;
-
-  try {
-
-    const data =
-      await fetchJSON(
-        'https://api.alternative.me/fng/?limit=1'
-      );
-
-
-    const item =
-      data?.data?.[0];
-
-
-    const result = {
-
-      value:
-        finite(
-          item?.value
-        ),
-
-      classification:
-        item?.value_classification ||
-        null,
-
-      source:
-        'Alternative.me'
-
-    };
-
-
-    cacheSet(
-      'fg',
-      result,
-      60000
-    );
-
-
-    return result;
-
-
-  } catch {
-
-    return {
-
-      value:
-        null,
-
-      classification:
-        null,
-
-      source:
-        'Unavailable'
-
-    };
-
-  }
-
-}
-
-
-/* =========================================================
-   MACRO / GLOBAL MARKETS
-========================================================= */
-
-async function globalMarkets() {
-
-  const cached =
-    cacheGet('markets');
-
-  if (cached)
-    return cached;
-
-
-  const symbols = {
-
-    SP500:
-      '%5EGSPC',
-
-    NASDAQ:
-      '%5EIXIC',
-
-    DOW:
-      '%5EDJI',
-
-    VIX:
-      '%5EVIX',
-
-    DXY:
-      'DX-Y.NYB'
+    ratio:
+      buyRatio /
+      Math.max(
+        sellRatio || 1,
+        0.0000001
+      )
 
   };
 
+}
 
-  const result = {};
 
+/* =========================================================
+   BINANCE FALLBACK
+   HTTP 451 होने पर Bybit primary रहेगा
+========================================================= */
 
-  for (
-    const [name, symbol]
-    of Object.entries(symbols)
-  ) {
+async function binanceSpotFallback() {
+
+  const urls = [
+
+    `${PROVIDERS.binance}` +
+    `/api/v3/ticker/24hr` +
+    `?symbol=${SYMBOL}`,
+
+    `${PROVIDERS.binanceVision}` +
+    `/api/v3/ticker/24hr` +
+    `?symbol=${SYMBOL}`
+
+  ];
+
+  for (const url of urls) {
 
     try {
 
-      const data =
-        await fetchJSON(
-
-          `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}` +
-          `?range=1d&interval=5m`,
-
-          {},
-
-          8000
-
+      const item =
+        await fetchJson(
+          url,
+          7000
         );
 
+      return {
 
-      const chart =
-        data?.chart?.result?.[0];
-
-      const quote =
-        chart
-          ?.indicators
-          ?.quote?.[0];
-
-
-      const closes =
-        (quote?.close || [])
-          .filter(
-            x =>
-              Number.isFinite(x)
-          );
-
-
-      const last =
-        closes.at(-1);
-
-      const previousClose =
-        closes.at(-2);
-
-
-      result[name] = {
-
-        last:
-          finite(last),
+        price:
+          n(item.lastPrice),
 
         change:
-          previousClose
-            ? (
-                (
-                  last -
-                  previousClose
-                ) /
-                previousClose
-              ) * 100
-            : null,
+          n(item.priceChangePercent),
 
-        source:
-          'Yahoo Finance'
+        volume24h:
+          n(item.volume),
+
+        turnover24h:
+          n(item.quoteVolume),
+
+        provider:
+          'Binance'
 
       };
 
+    } catch (error) {
 
-    } catch {
-
-      result[name] = {
-
-        last:
-          null,
-
-        change:
-          null,
-
-        source:
-          'Unavailable'
-
-      };
+      console.log(
+        'Binance fallback failed:',
+        error.message
+      );
 
     }
 
   }
 
-
-  cacheSet(
-    'markets',
-    result,
-    30000
-  );
-
-
-  return result;
+  return null;
 
 }
 
 
 /* =========================================================
-   ETF CONTEXT
+   TECHNICAL DATA
 ========================================================= */
 
-async function etfContext() {
+async function getTechnicals() {
 
-  /*
-    ETF data is DAILY context.
-    We deliberately do NOT pretend it is tick-by-tick.
-  */
+  const [
+    rows5,
+    rows15
+  ] = await Promise.all([
+
+    bybitKlines(
+      '5',
+      200
+    ),
+
+    bybitKlines(
+      '15',
+      200
+    )
+
+  ]);
+
+  const closes5 =
+    rows5.map(
+      row => row.close
+    );
+
+  const vwap =
+    sessionVWAP(
+      rows5.slice(-96)
+    );
+
+  const ema20 =
+    ema(
+      closes5.slice(-100),
+      20
+    );
+
+  const ema50 =
+    ema(
+      closes5.slice(-150),
+      50
+    );
+
+  const rsiValue =
+    rsi(
+      closes5,
+      14
+    );
+
+  const atrValue =
+    atr(
+      rows5,
+      14
+    );
+
+  const recentVolume =
+    avg(
+      rows5
+        .slice(-5)
+        .map(
+          row => row.volume
+        )
+    );
+
+  const previousVolume =
+    avg(
+      rows5
+        .slice(-25, -5)
+        .map(
+          row => row.volume
+        )
+    );
+
+  let trend = 'MIXED';
+
+  if (
+    ema20 &&
+    ema50 &&
+    closes5.length
+  ) {
+
+    const price =
+      closes5.at(-1);
+
+    if (
+      ema20 > ema50 &&
+      price > ema20
+    ) {
+
+      trend = 'BULLISH';
+
+    } else if (
+      ema20 < ema50 &&
+      price < ema20
+    ) {
+
+      trend = 'BEARISH';
+
+    }
+
+  }
+
+  const closes15 =
+    rows15.map(
+      row => row.close
+    );
+
+  const ema20_15 =
+    ema(
+      closes15.slice(-100),
+      20
+    );
+
+  const ema50_15 =
+    ema(
+      closes15.slice(-150),
+      50
+    );
+
+  let trend15 = 'MIXED';
+
+  if (
+    ema20_15 &&
+    ema50_15 &&
+    closes15.length
+  ) {
+
+    const price15 =
+      closes15.at(-1);
+
+    if (
+      ema20_15 > ema50_15 &&
+      price15 > ema20_15
+    ) {
+
+      trend15 = 'BULLISH';
+
+    } else if (
+      ema20_15 < ema50_15 &&
+      price15 < ema20_15
+    ) {
+
+      trend15 = 'BEARISH';
+
+    }
+
+  }
 
   return {
 
-    score:
-      50,
+    rows5,
 
-    label:
-      'ETF DATA UNAVAILABLE',
+    rows15,
 
-    source:
-      'Farside daily context'
+    technical: {
+
+      rsi:
+        rsiValue,
+
+      vwap,
+
+      ema20,
+
+      ema50,
+
+      atr:
+        atrValue,
+
+      trend,
+
+      volumeRatio:
+        previousVolume
+          ? recentVolume /
+            previousVolume
+          : null
+
+    },
+
+    technical15: {
+
+      trend:
+        trend15,
+
+      ema20:
+        ema20_15,
+
+      ema50:
+        ema50_15
+
+    }
 
   };
-
-}
-
-
-/* =========================================================
-   SNAPSHOT DELTA
-========================================================= */
-
-function snapshotDelta(
-  key,
-  value
-) {
-
-  const old =
-    previous.get(key);
-
-
-  previous.set(
-    key,
-    {
-      value,
-      time:
-        Date.now()
-    }
-  );
-
-
-  if (!old)
-    return null;
-
-
-  return pctChange(
-    value,
-    old.value
-  );
 
 }
 
@@ -1279,308 +841,247 @@ function snapshotDelta(
    SIGNAL FACTORS
 ========================================================= */
 
-function factorFromTrend(
-  value
-) {
-
-  if (
-    value ===
-    'BULLISH'
-  ) {
-
-    return 80;
-
-  }
-
-  if (
-    value ===
-    'BEARISH'
-  ) {
-
-    return 20;
-
-  }
-
-  return 50;
-
-}
-
-
-function factorFromRSI(
-  value
-) {
-
-  if (value == null)
-    return 50;
-
-
-  if (
-    value >= 55 &&
-    value <= 70
-  ) {
-
-    return 75;
-
-  }
-
-
-  if (
-    value >= 30 &&
-    value < 45
-  ) {
-
-    return 30;
-
-  }
-
-
-  if (value > 70)
-    return 45;
-
-
-  if (value < 30)
-    return 55;
-
-
-  return 50;
-
-}
-
-
-function factorFromRelation(
-  price,
-  ema20Value,
-  ema50Value,
-  vwapValue
-) {
-
-  let score = 50;
-
-
-  if (
-    price >
-    ema20Value
-  ) {
-
-    score += 10;
-
-  } else if (
-    price <
-    ema20Value
-  ) {
-
-    score -= 10;
-
-  }
-
-
-  if (
-    ema20Value >
-    ema50Value
-  ) {
-
-    score += 15;
-
-  } else if (
-    ema20Value <
-    ema50Value
-  ) {
-
-    score -= 15;
-
-  }
-
-
-  if (
-    price >
-    vwapValue
-  ) {
-
-    score += 15;
-
-  } else if (
-    price <
-    vwapValue
-  ) {
-
-    score -= 15;
-
-  }
-
-
-  return clamp(
-    score,
-    0,
-    100
-  );
-
-}
-
-
-/* =========================================================
-   SIGNAL ENGINE
-========================================================= */
-
-function buildSignal({
+function calculateFactors({
 
   price,
-  tech5,
-  tech15,
-  futures,
-  liquidation,
-  fg,
-  etf
+
+  technical,
+
+  oiDelta,
+
+  funding,
+
+  longShort
 
 }) {
 
-  const fprice =
-    factorFromTrend(
-      tech5.trend
-    );
+  const priceScore =
+    technical.trend === 'BULLISH'
+      ? 75
+      : technical.trend === 'BEARISH'
+        ? 25
+        : 50;
 
 
-  const frsi =
-    factorFromRSI(
-      tech5.rsi
-    );
-
-
-  const fema =
-    factorFromRelation(
-      price,
-      tech5.ema20,
-      tech5.ema50,
-      tech5.vwap
-    );
-
-
-  const fvol =
-    50;
-
-
-  /*
-    OI is neutral until historical
-    delta is warmed up.
-  */
-
-  const foi =
-    futures.oi == null
-      ? 50
-      : 50;
-
-
-  let ffund = 50;
+  let rsiScore = 50;
 
   if (
-    futures.fundingRate !=
-    null
-  ) {
-
-    ffund =
-      clamp(
-        50 +
-        futures.fundingRate *
-        100000,
-
-        0,
-        100
-      );
-
-  }
-
-
-  let fliq = 50;
-
-  if (
-    liquidation.long1h !=
-    null &&
-    liquidation.short1h !=
-    null
+    technical.rsi != null
   ) {
 
     if (
-      liquidation.short1h >
-      liquidation.long1h
+      technical.rsi < 30
     ) {
 
-      fliq = 65;
+      rsiScore = 80;
 
     } else if (
-      liquidation.long1h >
-      liquidation.short1h
+      technical.rsi > 70
     ) {
 
-      fliq = 35;
+      rsiScore = 20;
+
+    } else {
+
+      rsiScore =
+        50 +
+        (
+          50 -
+          technical.rsi
+        ) * 0.5;
 
     }
 
   }
 
 
-  const flarge =
-    50;
+  let emaScore = 50;
+
+  if (
+    technical.vwap &&
+    price
+  ) {
+
+    emaScore +=
+      price >
+      technical.vwap
+        ? 20
+        : -20;
+
+  }
+
+  if (
+    technical.ema20 &&
+    technical.ema50
+  ) {
+
+    emaScore +=
+      technical.ema20 >
+      technical.ema50
+        ? 15
+        : -15;
+
+  }
+
+  emaScore =
+    clamp(emaScore);
 
 
-  const fetf =
-    etf.score;
-
-
-  const fmacro =
-    50;
-
-
-  const ffg =
-    fg.value == null
+  const volumeScore =
+    technical.volumeRatio == null
       ? 50
       : clamp(
-          fg.value,
-          0,
-          100
+          50 +
+          (
+            technical.volumeRatio -
+            1
+          ) * 35
         );
 
 
-  /*
-    SCORE WEIGHTS
+  const oiScore =
+    oiDelta == null
+      ? 50
+      : clamp(
+          50 +
+          oiDelta * 5
+        );
 
-    Price Structure 15
-    RSI             10
-    EMA + VWAP      10
-    Volume          10
-    Open Interest   15
-    Funding          5
-    Liquidation     10
-    Large Trade     10
-    ETF              5
-    Macro            5
-    Fear & Greed     5
-  */
 
-  const score =
-    Math.round(
+  const fundingScore =
+    funding == null
+      ? 50
+      : clamp(
+          50 -
+          funding * 10000
+        );
 
-      fprice * 0.15 +
 
-      frsi * 0.10 +
+  const liquidationScore =
+    50;
 
-      fema * 0.10 +
 
-      fvol * 0.10 +
+  const largeTradeScore =
+    longShort?.ratio > 1.10
+      ? 60
+      : longShort?.ratio < 0.90
+        ? 40
+        : 50;
 
-      foi * 0.15 +
 
-      ffund * 0.05 +
+  return {
 
-      fliq * 0.10 +
+    price:
+      priceScore,
 
-      flarge * 0.10 +
+    rsi:
+      rsiScore,
 
-      fetf * 0.05 +
+    ema:
+      emaScore,
 
-      fmacro * 0.05 +
+    volume:
+      volumeScore,
 
-      ffg * 0.05
+    oi:
+      oiScore,
 
-    );
+    funding:
+      fundingScore,
+
+    liq:
+      liquidationScore,
+
+    large:
+      largeTradeScore,
+
+    etf:
+      50,
+
+    macro:
+      50,
+
+    fg:
+      50
+
+  };
+
+}
+
+
+/* =========================================================
+   SIGNAL ENGINE 0–100
+========================================================= */
+
+function makeSignal(
+  price,
+  technical,
+  factors,
+  atrValue
+) {
+
+  const weights = {
+
+    price: 15,
+
+    rsi: 10,
+
+    ema: 10,
+
+    volume: 10,
+
+    oi: 15,
+
+    funding: 5,
+
+    liq: 10,
+
+    large: 10,
+
+    etf: 5,
+
+    macro: 5,
+
+    fg: 5
+
+  };
+
+
+  let weightedScore = 0;
+
+  let totalWeight = 0;
+
+
+  for (
+    const [
+      key,
+      weight
+    ] of Object.entries(weights)
+  ) {
+
+    const value =
+      n(factors[key]);
+
+    if (
+      value != null
+    ) {
+
+      weightedScore +=
+        value * weight;
+
+      totalWeight +=
+        weight;
+
+    }
+
+  }
+
+
+  const finalScore =
+    totalWeight
+      ? weightedScore /
+        totalWeight
+      : 50;
 
 
   let direction =
@@ -1588,130 +1089,79 @@ function buildSignal({
 
 
   if (
-    score >= 62
+    finalScore >= 60
   ) {
 
     direction =
-      'BUY';
+      'LONG';
 
   } else if (
-    score <= 38
+    finalScore <= 40
   ) {
 
     direction =
-      'SELL';
+      'SHORT';
 
   }
 
 
-  const atrValue =
-    tech5.atr ||
+  const atrValueSafe =
+    atrValue ||
     price * 0.003;
 
 
-  let entry =
+  const entry =
     price;
 
-  let sl =
-    null;
 
-  let target1 =
-    null;
-
-  let target2 =
-    null;
+  let sl = null;
+  let target1 = null;
+  let target2 = null;
 
 
   if (
-    direction ===
-    'BUY'
+    direction === 'LONG'
   ) {
 
     sl =
       price -
-      Math.max(
-        atrValue * 1.1,
-        price * 0.0015
-      );
-
+      atrValueSafe * 1.2;
 
     target1 =
       price +
-      (
-        price -
-        sl
-      ) * 1.2;
-
+      atrValueSafe * 1.5;
 
     target2 =
       price +
-      (
-        price -
-        sl
-      ) * 2;
+      atrValueSafe * 2.5;
+
+  }
 
 
-  } else if (
-    direction ===
-    'SELL'
+  if (
+    direction === 'SHORT'
   ) {
 
     sl =
       price +
-      Math.max(
-        atrValue * 1.1,
-        price * 0.0015
-      );
-
+      atrValueSafe * 1.2;
 
     target1 =
       price -
-      (
-        sl -
-        price
-      ) * 1.2;
-
+      atrValueSafe * 1.5;
 
     target2 =
       price -
-      (
-        sl -
-        price
-      ) * 2;
+      atrValueSafe * 2.5;
 
   }
 
 
   const confidence =
     Math.round(
-      50 +
       Math.abs(
-        score - 50
-      ) * 1.35
-    );
-
-
-  const availableFactors = [
-
-    tech5.rsi,
-    tech5.ema20,
-    tech5.ema50,
-    tech5.vwap,
-    futures.oi,
-    futures.fundingRate,
-    fg.value
-
-  ].filter(
-    x => x != null
-  ).length;
-
-
-  const coverage =
-    Math.round(
-      (
-        availableFactors /
-        7
-      ) * 100
+        finalScore - 50
+      ) * 2
     );
 
 
@@ -1719,62 +1169,41 @@ function buildSignal({
 
 
   reasons.push(
-    `5m trend ${tech5.trend}`
+    `Price structure ${technical.trend}`
   );
 
 
   if (
-    tech5.rsi !=
-    null
+    technical.rsi != null
   ) {
 
     reasons.push(
-      `RSI ${tech5.rsi.toFixed(1)}`
-    );
-
-  }
-
-
-  reasons.push(
-    `EMA/VWAP ${
-      fema >= 55
-        ? 'supportive'
-        : 'weak'
-    }`
-  );
-
-
-  if (
-    futures.oi ==
-    null
-  ) {
-
-    reasons.push(
-      'OI unavailable'
+      `RSI ${technical.rsi.toFixed(1)}`
     );
 
   }
 
 
   if (
-    futures.fundingRate ==
-    null
+    technical.vwap
   ) {
 
     reasons.push(
-      'Funding unavailable'
+      price >
+      technical.vwap
+        ? 'Price above VWAP'
+        : 'Price below VWAP'
     );
 
   }
 
 
   if (
-    fg.value !=
-    null
+    technical.volumeRatio != null
   ) {
 
     reasons.push(
-      `Fear & Greed ${fg.value}`
+      `Volume ${technical.volumeRatio.toFixed(2)}x`
     );
 
   }
@@ -1782,28 +1211,24 @@ function buildSignal({
 
   return {
 
-    score,
+    score:
+      Math.round(
+        clamp(finalScore)
+      ),
 
     direction,
 
     label:
-
-      direction ===
-      'BUY'
-
-        ? '🟢 BUY — CONFIRMATION'
-
-        : direction ===
-          'SELL'
-
-          ? '🔴 SELL — CONFIRMATION'
-
-          : '🟡 WAIT — NO CLEAR EDGE',
-
+      direction === 'LONG'
+        ? '🟢 LONG — TRADE SETUP'
+        : direction === 'SHORT'
+          ? '🔴 SHORT — TRADE SETUP'
+          : '🟡 WAIT — CONFIRMATION NEEDED',
 
     confidence,
 
-    coverage,
+    coverage:
+      Math.round(totalWeight),
 
     entry,
 
@@ -1814,64 +1239,16 @@ function buildSignal({
     target2,
 
     holding:
-
-      direction ===
-      'WAIT'
-
+      direction === 'WAIT'
         ? 'Wait for confirmation'
-
         : '5–30 min scalp window',
 
-
     decision:
-
-      direction ===
-      'WAIT'
-
-        ? 'No-trade / confirmation mode'
-
-        : 'Decision support only — guaranteed profit नहीं।',
-
+      'Decision support only — guaranteed profit नहीं।',
 
     reasons,
 
-
-    factors: {
-
-      price:
-        fprice,
-
-      rsi:
-        frsi,
-
-      ema:
-        fema,
-
-      volume:
-        fvol,
-
-      oi:
-        foi,
-
-      funding:
-        ffund,
-
-      liq:
-        fliq,
-
-      large:
-        flarge,
-
-      etf:
-        fetf,
-
-      macro:
-        fmacro,
-
-      fg:
-        ffg
-
-    }
+    factors
 
   };
 
@@ -1879,304 +1256,211 @@ function buildSignal({
 
 
 /* =========================================================
-   DASHBOARD DATA
+   COMPLETE DASHBOARD DATA
 ========================================================= */
 
-async function dashboard() {
+async function getDashboardData() {
 
-  const results =
-    await Promise.allSettled([
+  let ticker = null;
 
-      spot24h(),
-
-      klines(
-        '5m',
-        120
-      ),
-
-      klines(
-        '15m',
-        120
-      ),
-
-      futuresStats(),
-
-      liquidationStats(),
-
-      fearGreed(),
-
-      globalMarkets(),
-
-      etfContext()
-
-    ]);
+  let provider =
+    'Bybit';
 
 
-  const [
+  try {
 
-    spotResult,
-    k5Result,
-    k15Result,
-    futuresResult,
-    liquidationResult,
-    fgResult,
-    marketsResult,
-    etfResult
+    ticker =
+      await bybitTicker();
 
-  ] = results;
+  } catch (error) {
 
+    console.log(
+      'Bybit ticker error:',
+      error.message
+    );
 
-  if (
-    spotResult.status !==
-    'fulfilled'
-  ) {
+    ticker =
+      await binanceSpotFallback();
 
-    throw spotResult.reason;
+    provider =
+      ticker
+        ? 'Binance'
+        : 'Unavailable';
 
   }
 
 
-  if (
-    k5Result.status !==
-    'fulfilled'
-  ) {
+  if (!ticker) {
 
-    throw k5Result.reason;
+    throw new Error(
+      'BTC market data unavailable from Bybit and Binance fallback'
+    );
 
   }
 
 
-  const spot =
-    spotResult.value;
+  const {
+
+    rows5,
+
+    rows15,
+
+    technical,
+
+    technical15
+
+  } = await getTechnicals();
 
 
-  const rows5 =
-    k5Result.value;
-
-
-  const rows15 =
-    k15Result.status ===
-    'fulfilled'
-
-      ? k15Result.value
-
-      : rows5;
-
-
-  const futures =
-    futuresResult.status ===
-    'fulfilled'
-
-      ? futuresResult.value
-
-      : {
-
-          markPrice:null,
-
-          indexPrice:null,
-
-          fundingRate:null,
-
-          nextFundingTime:null,
-
-          oi:null,
-
-          longShortRatio:null,
-
-          source:
-            'Unavailable'
-
-        };
-
-
-  const liquidation =
-    liquidationResult.status ===
-    'fulfilled'
-
-      ? liquidationResult.value
-
-      : {
-
-          total1h:null,
-
-          long1h:null,
-
-          short1h:null,
-
-          bias:
-            'UNAVAILABLE',
-
-          source:
-            'Unavailable'
-
-        };
-
-
-  const fg =
-    fgResult.status ===
-    'fulfilled'
-
-      ? fgResult.value
-
-      : {
-
-          value:null,
-
-          classification:null,
-
-          source:
-            'Unavailable'
-
-        };
-
-
-  const markets =
-    marketsResult.status ===
-    'fulfilled'
-
-      ? marketsResult.value
-
-      : {};
-
-
-  const etf =
-    etfResult.status ===
-    'fulfilled'
-
-      ? etfResult.value
-
-      : {
-
-          score:50,
-
-          label:
-            'ETF DATA UNAVAILABLE',
-
-          source:
-            'Unavailable'
-
-        };
-
-
-  const tech5 =
-    technical(
-      rows5
+  const oiData =
+    await bybitOI(
+      '5min'
+    ).catch(
+      () => []
     );
 
 
-  const tech15 =
-    technical(
-      rows15
+  const oiNow =
+    oiData.at(-1)?.oi ??
+    null;
+
+
+  const oiPrevious =
+    oiData.at(-2)?.oi ??
+    null;
+
+
+  const oiChange =
+    pct(
+      oiNow,
+      oiPrevious
     );
 
 
-  const signal =
-    buildSignal({
+  const longShort =
+    await bybitLongShort()
+      .catch(
+        () => null
+      );
+
+
+  const factors =
+    calculateFactors({
 
       price:
-        spot.price,
+        ticker.price,
 
-      tech5,
+      technical,
 
-      tech15,
+      oiDelta:
+        oiChange,
 
-      futures,
+      funding:
+        ticker.fundingRate,
 
-      liquidation,
-
-      fg,
-
-      etf
+      longShort
 
     });
 
 
-  const oiDelta =
-    snapshotDelta(
-      'oi',
-      futures.oi
+  const signal =
+    makeSignal(
+
+      ticker.price,
+
+      technical,
+
+      factors,
+
+      technical.atr
+
     );
 
 
-  const volumeDelta =
-    snapshotDelta(
-      'volume',
-      spot.quoteVolume24h
+  const recentVolume =
+    avg(
+      rows5
+        .slice(-5)
+        .map(
+          x => x.volume
+        )
+    );
+
+
+  const previousVolume =
+    avg(
+      rows5
+        .slice(-25, -5)
+        .map(
+          x => x.volume
+        )
+    );
+
+
+  const volumeChange =
+    pct(
+      recentVolume,
+      previousVolume
     );
 
 
   const oiRows = [
 
-    {
-      tf:'1m',
-      oi:futures.oi,
-      change:oiDelta,
-      volume:spot.volume24h,
-      volumeChange:volumeDelta
-    },
+    '1m',
 
-    {
-      tf:'5m',
-      oi:futures.oi,
-      change:oiDelta,
-      volume:spot.volume24h,
-      volumeChange:volumeDelta
-    },
+    '5m',
 
-    {
-      tf:'10m',
-      oi:futures.oi,
-      change:oiDelta,
-      volume:spot.volume24h,
-      volumeChange:volumeDelta
-    },
+    '10m',
 
-    {
-      tf:'30m',
-      oi:futures.oi,
-      change:oiDelta,
-      volume:spot.volume24h,
-      volumeChange:volumeDelta
-    },
+    '30m',
 
-    {
-      tf:'1h',
-      oi:futures.oi,
-      change:oiDelta,
-      volume:spot.volume24h,
-      volumeChange:volumeDelta
-    }
+    '1h'
 
-  ];
+  ].map(tf => ({
 
+    tf,
 
-  return {
-
-    ok:true,
-
-    timestamp:
-      new Date()
-        .toISOString(),
-
-    source:
-      'Binance Spot + Binance Futures + public macro/sentiment sources',
-
-
-    price:
-      spot.price,
+    oi:
+      oiNow,
 
     change:
-      spot.change,
+      oiChange,
+
+    volume:
+      recentVolume,
+
+    volumeChange
+
+  }));
+
+
+  const data = {
+
+    ok:
+      true,
+
+    timestamp:
+      nowISO(),
+
+    source:
+      'Bybit primary / Binance fallback',
+
+    price:
+      ticker.price,
+
+    change:
+      ticker.change,
 
     volume24h:
-      spot.volume24h,
+      ticker.volume24h,
+
+    turnover24h:
+      ticker.turnover24h,
 
 
-    technical:
-      tech5,
+    technical,
 
-    technical15:
-      tech15,
+    technical15,
 
 
     signal,
@@ -2186,59 +1470,88 @@ async function dashboard() {
       oiRows,
 
 
-    funding: {
+    openInterest: {
 
-      rate:
-        futures.fundingRate,
+      btc:
+        oiNow,
 
-      nextFundingTime:
-        futures.nextFundingTime
+      usd:
+        null,
+
+      change5m:
+        oiChange,
+
+      source:
+        'Bybit'
 
     },
 
 
-    longShort:
+    funding: {
 
-      futures.longShortRatio ==
-      null
+      rate:
+        ticker.fundingRate,
 
-        ? null
+      nextFundingTime:
+        ticker.nextFundingTime,
 
-        : {
-            ratio:
-              futures.longShortRatio
-          },
+      source:
+        'Bybit'
 
-
-    liquidation,
+    },
 
 
-    markets,
+    longShort,
+
+
+    liquidation: {
+
+      total1h:
+        null,
+
+      long1h:
+        null,
+
+      short1h:
+        null,
+
+      bias:
+        'UNAVAILABLE'
+
+    },
+
+
+    markets: {
+
+      BTCUSDT: {
+
+        last:
+          ticker.price,
+
+        change:
+          ticker.change
+
+      }
+
+    },
 
 
     sessions: {
 
-      India:'OPEN',
+      India:
+        'OPEN',
 
-      UK:'OPEN',
+      UK:
+        'OPEN',
 
-      USA:'OPEN',
+      USA:
+        'OPEN',
 
-      China:'OPEN',
+      China:
+        'OPEN',
 
       note:
-        'Session labels are informational.'
-
-    },
-
-
-    fearGreed: {
-
-      value:
-        fg.value,
-
-      classification:
-        fg.classification
+        'Crypto trades 24/7; index sessions are indicative only.'
 
     },
 
@@ -2246,43 +1559,33 @@ async function dashboard() {
     sourceLinks: [
 
       {
-        name:
-          'Binance Spot',
 
-        url:
-          'https://www.binance.com/en/markets'
-      },
-
-      {
-        name:
-          'Binance Futures',
-
-        url:
-          'https://www.binance.com/en/futures'
-      },
-
-      {
-        name:
-          'Alternative.me Fear & Greed',
-
-        url:
-          'https://alternative.me/crypto/fear-and-greed-index/'
-      },
-
-      {
-        name:
-          'Farside ETF',
-
-        url:
-          'https://farside.co.uk/btc/'
-      },
-
-      {
         name:
           'TradingView',
 
         url:
-          'https://www.tradingview.com/symbols/BTCUSDT/'
+          'https://www.tradingview.com/chart/?symbol=BINANCE:BTCUSDT'
+
+      },
+
+      {
+
+        name:
+          'Bybit',
+
+        url:
+          'https://www.bybit.com'
+
+      },
+
+      {
+
+        name:
+          'Binance',
+
+        url:
+          'https://www.binance.com'
+
       }
 
     ],
@@ -2294,69 +1597,67 @@ async function dashboard() {
     sources: [
 
       {
+
         name:
-          'Binance Spot Price',
+          'Bybit market data',
 
         status:
           'LIVE'
+
       },
 
       {
+
         name:
-          'Binance Futures OI',
+          'Binance fallback',
 
         status:
-          futures.oi != null
-            ? 'LIVE'
-            : 'UNAVAILABLE'
+          'READY'
+
       },
 
       {
+
         name:
-          'Binance Funding',
+          'Open Interest',
 
         status:
-          futures.fundingRate != null
+          oiNow != null
             ? 'LIVE'
             : 'UNAVAILABLE'
+
       },
 
       {
+
+        name:
+          'Funding',
+
+        status:
+          ticker.fundingRate != null
+            ? 'LIVE'
+            : 'UNAVAILABLE'
+
+      },
+
+      {
+
         name:
           'Liquidations',
 
         status:
-          liquidation.total1h != null
-            ? 'LIVE'
-            : 'UNAVAILABLE'
+          'UNAVAILABLE without dedicated feed'
+
       },
 
       {
+
         name:
-          'Fear & Greed',
+          'ETF/Macro/Fear & Greed',
 
         status:
-          fg.value != null
-            ? 'LIVE'
-            : 'UNAVAILABLE'
-      },
+          'NOT CONNECTED'
 
-      {
-        name:
-          'Macro / Indices',
-
-        status:
-          Object.keys(markets).length
-            ? 'LIVE'
-            : 'UNAVAILABLE'
-      },
-
-      {
-        name:
-          'ETF Flow',
-
-        status:
-          'DAILY CONTEXT / NOT TICK DATA'
       }
 
     ],
@@ -2365,17 +1666,26 @@ async function dashboard() {
     stream: {
 
       connected:
-        streamConnected,
+        true,
 
       lastMessage:
-        streamLastMessage,
+        state.stream.lastMessage,
 
       reconnects:
-        streamReconnects
+        state.stream.reconnects,
+
+      provider
 
     }
 
   };
+
+
+  state.last =
+    data;
+
+
+  return data;
 
 }
 
@@ -2386,31 +1696,37 @@ async function dashboard() {
 
 app.get(
   '/api/health',
-  (req,res) => {
+  (req, res) => {
 
     res.json({
 
-      ok:true,
+      ok:
+        true,
 
       service:
-        'BTC/USD AI SCALPING ENGINE V5',
+        'BTC/USD AI SCALPING ENGINE V4',
 
       time:
-        new Date()
-          .toISOString(),
+        nowISO(),
 
-      websocket: {
+      WebSocket: {
 
         connected:
-          streamConnected,
+          state.stream.connected,
 
         lastMessage:
-          streamLastMessage,
+          state.stream.lastMessage,
 
         reconnects:
-          streamReconnects
+          state.stream.reconnects
 
       },
+
+      provider:
+        state.stream.provider,
+
+      lastError:
+        null,
 
       uptime:
         process.uptime(),
@@ -2430,15 +1746,12 @@ app.get(
 
 app.get(
   '/api/price',
-  async (req,res) => {
+  async (req, res) => {
 
     try {
 
-      const price =
-        await spot24h();
-
-      const futures =
-        await futuresStats();
+      const data =
+        await getDashboardData();
 
 
       res.json({
@@ -2447,48 +1760,42 @@ app.get(
           SYMBOL,
 
         lastPrice:
-          price.price,
+          data.price,
 
         markPrice:
-          futures.markPrice,
+          data.price,
 
         indexPrice:
-          futures.indexPrice,
+          null,
 
         fundingRate:
-          futures.fundingRate,
+          data.funding.rate,
 
         nextFundingTime:
-          futures.nextFundingTime,
+          data.funding.nextFundingTime,
 
         volume24h:
-          price.volume24h,
+          data.volume24h,
 
         turnover24h:
-          price.quoteVolume24h,
+          data.turnover24h,
 
         price24hPcnt:
-          price.change != null
-            ? price.change / 100
-            : null,
+          data.change,
 
         source:
-          'Binance'
+          data.stream.provider
 
       });
 
-
     } catch (error) {
 
-      res.status(503)
-        .json({
+      res.status(503).json({
 
-          ok:false,
+        error:
+          error.message
 
-          error:
-            error.message
-
-        });
+      });
 
     }
 
@@ -2497,94 +1804,40 @@ app.get(
 
 
 /* =========================================================
-   MAIN DASHBOARD API
+   DASHBOARD API
 ========================================================= */
 
 app.get(
   '/api/dashboard',
-  async (req,res) => {
+  async (req, res) => {
 
     try {
 
       const data =
-        await dashboard();
+        await getDashboardData();
 
       res.json(data);
-
 
     } catch (error) {
 
       console.error(
-        'Dashboard error:',
-        error
+        'Dashboard API error:',
+        error.message
       );
 
+      res.status(503).json({
 
-      res.status(503)
-        .json({
+        ok:
+          false,
 
-          ok:false,
+        error:
+          error.message,
 
-          error:
-            error.message ||
-            'Dashboard data unavailable'
-
-        });
-
-    }
-
-  }
-);
-
-
-/* =========================================================
-   OPEN INTEREST API
-========================================================= */
-
-app.get(
-  '/api/oi',
-  async (req,res) => {
-
-    try {
-
-      const futures =
-        await futuresStats();
-
-
-      res.json({
-
-        ok:true,
-
-        symbol:
-          SYMBOL,
-
-        openInterest:
-          futures.oi,
-
-        fundingRate:
-          futures.fundingRate,
-
-        longShortRatio:
-          futures.longShortRatio,
-
-        source:
-          'Binance Futures'
+        timestamp:
+          nowISO()
 
       });
 
-
-    } catch (error) {
-
-      res.status(503)
-        .json({
-
-          ok:false,
-
-          error:
-            error.message
-
-        });
-
     }
 
   }
@@ -2592,75 +1845,64 @@ app.get(
 
 
 /* =========================================================
-   FUNDING API
+   SIGNAL HISTORY
 ========================================================= */
 
 app.get(
-  '/api/funding',
-  async (req,res) => {
+  '/api/history',
+  (req, res) => {
 
-    try {
+    res.json({
 
-      const futures =
-        await futuresStats();
+      ok:
+        true,
 
+      items:
+        [
+          ...state.history.values()
+        ]
+          .slice(-150)
+          .reverse()
 
-      res.json({
-
-        ok:true,
-
-        symbol:
-          SYMBOL,
-
-        fundingRate:
-          futures.fundingRate,
-
-        nextFundingTime:
-          futures.nextFundingTime,
-
-        source:
-          'Binance Futures'
-
-      });
-
-
-    } catch (error) {
-
-      res.status(503)
-        .json({
-
-          ok:false,
-
-          error:
-            error.message
-
-        });
-
-    }
+    });
 
   }
 );
 
 
 /* =========================================================
-   EXPRESS 5 SAFE FRONTEND FALLBACK
+   FRONTEND FALLBACK
+   IMPORTANT:
+   NO app.get('*')
 ========================================================= */
-
-/*
-  IMPORTANT:
-
-  Do NOT use:
-
-  app.get('*', ...)
-
-  because Express 5 / path-to-regexp
-  can reject that route.
-
-  This middleware is compatible.
-*/
 
 app.use(
-  (req,res) => {
+  (req, res, next) => {
+
+    if (
+      req.path.startsWith('/api/')
+    ) {
+
+      return res
+        .status(404)
+        .json({
+
+          error:
+            'API endpoint not found'
+
+        });
+
+    }
+
+    next();
+
+  }
+);
+
+
+app.get(
+  '/',
+  (req, res) => {
 
     res.sendFile(
       path.join(
@@ -2675,39 +1917,69 @@ app.use(
 
 
 /* =========================================================
-   BINANCE WEBSOCKET
+   START SERVER
 ========================================================= */
 
-function startStream() {
+const server =
+  app.listen(
+    PORT,
+    HOST,
+    () => {
 
-  if (ws) {
+      console.log(
+        `BTC AI Scalping Engine listening on ${HOST}:${PORT}`
+      );
 
-    try {
-      ws.close();
-    } catch {}
-
-  }
+    }
+  );
 
 
-  const url =
-    'wss://stream.binance.com:9443/ws/btcusdt@ticker';
+/* =========================================================
+   BYBIT WEBSOCKET
+========================================================= */
 
+let ws = null;
+
+
+function connectWebSocket() {
 
   try {
 
     ws =
-      new WebSocket(url);
+      new WebSocket(
+        'wss://stream.bybit.com/v5/public/linear'
+      );
 
 
     ws.on(
       'open',
       () => {
 
-        streamConnected =
+        state.stream.connected =
           true;
 
+        state.stream.provider =
+          'Bybit';
+
+
         console.log(
-          'Binance WebSocket connected'
+          'Bybit WebSocket connected'
+        );
+
+
+        ws.send(
+          JSON.stringify({
+
+            op:
+              'subscribe',
+
+            args: [
+
+              'tickers.BTCUSDT'
+
+            ]
+
+          })
         );
 
       }
@@ -2716,10 +1988,34 @@ function startStream() {
 
     ws.on(
       'message',
-      () => {
+      message => {
 
-        streamLastMessage =
+        state.stream.lastMessage =
           Date.now();
+
+
+        try {
+
+          const data =
+            JSON.parse(
+              message.toString()
+            );
+
+
+          const price =
+            data?.data?.lastPrice;
+
+
+          if (price) {
+
+            state.lastPrice =
+              n(price);
+
+          }
+
+        } catch (error) {
+
+        }
 
       }
     );
@@ -2729,10 +2025,21 @@ function startStream() {
       'close',
       () => {
 
-        streamConnected =
+        state.stream.connected =
           false;
 
-        scheduleStream();
+        state.stream.reconnects++;
+
+
+        console.log(
+          'Bybit WebSocket closed. Reconnecting...'
+        );
+
+
+        setTimeout(
+          connectWebSocket,
+          5000
+        );
 
       }
     );
@@ -2742,77 +2049,166 @@ function startStream() {
       'error',
       error => {
 
-        streamConnected =
+        state.stream.connected =
           false;
 
-        console.error(
+        console.log(
           'WebSocket error:',
           error.message
         );
-
-        try {
-          ws.close();
-        } catch {}
 
       }
     );
 
 
-  } catch {
+  } catch (error) {
 
-    streamConnected =
+    state.stream.connected =
       false;
 
-    scheduleStream();
+    setTimeout(
+      connectWebSocket,
+      5000
+    );
 
   }
 
 }
 
 
-/* =========================================================
-   WEBSOCKET RECONNECT
-========================================================= */
-
-function scheduleStream() {
-
-  if (wsTimer)
-    return;
-
-
-  streamReconnects++;
-
-
-  wsTimer =
-    setTimeout(
-      () => {
-
-        wsTimer =
-          null;
-
-        startStream();
-
-      },
-      5000
-    );
-
-}
+connectWebSocket();
 
 
 /* =========================================================
-   START SERVER
+   SIGNAL HISTORY AUTO UPDATE
 ========================================================= */
 
-app.listen(
-  PORT,
-  HOST,
+setInterval(
+  async () => {
+
+    try {
+
+      const data =
+        await getDashboardData();
+
+
+      const signal =
+        data.signal;
+
+
+      if (
+        signal &&
+        signal.direction !== 'WAIT'
+      ) {
+
+        const key =
+          signal.direction +
+          '-' +
+          Math.floor(
+            Date.now() / 60000
+          );
+
+
+        if (
+          key !==
+          state.lastSignalKey
+        ) {
+
+          state.lastSignalKey =
+            key;
+
+
+          state.history.set(
+            key,
+            {
+
+              id:
+                Date.now(),
+
+              direction:
+                signal.direction,
+
+              label:
+                signal.label,
+
+              score:
+                signal.score,
+
+              confidence:
+                signal.confidence,
+
+              entry:
+                signal.entry,
+
+              sl:
+                signal.sl,
+
+              target1:
+                signal.target1,
+
+              target2:
+                signal.target2,
+
+              time:
+                nowISO(),
+
+              read:
+                false
+
+            }
+          );
+
+
+          while (
+            state.history.size >
+            150
+          ) {
+
+            state.history.delete(
+              state.history
+                .keys()
+                .next()
+                .value
+            );
+
+          }
+
+        }
+
+      }
+
+    } catch (error) {
+
+      console.log(
+        'Signal history update:',
+        error.message
+      );
+
+    }
+
+  },
+  10000
+);
+
+
+/* =========================================================
+   GRACEFUL SHUTDOWN
+========================================================= */
+
+process.on(
+  'SIGTERM',
   () => {
 
-    console.log(
-      `BTC AI SCALPING ENGINE V5 listening on ${HOST}:${PORT}`
-    );
+    try {
 
-    startStream();
+      ws?.close();
+
+    } catch (e) {}
+
+
+    server.close(
+      () => process.exit(0)
+    );
 
   }
 );
