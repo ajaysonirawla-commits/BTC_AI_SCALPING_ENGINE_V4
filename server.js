@@ -1,44 +1,70 @@
-require('dotenv').config();
+require("dotenv").config();
 
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-const http = require('http');
-const WebSocket = require('ws');
+const express = require("express");
+const cors = require("cors");
+const path = require("path");
+const http = require("http");
+const WebSocket = require("ws");
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/ws' });
+const wss = new WebSocket.Server({ server });
 
 app.use(cors());
-app.use(express.json({ limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'frontend')));
+app.use(express.json({ limit: "1mb" }));
 
-const PORT = Number(process.env.PORT || 3000);
-const HOST = process.env.HOST || '0.0.0.0';
-const SYMBOL = process.env.SYMBOL || 'BTCUSDT';
+// ------------------------------------------------------------
+// CONFIG
+// ------------------------------------------------------------
 
-const SPOT_BASES = [
-  'https://api.binance.com',
-  'https://api1.binance.com',
-  'https://api2.binance.com',
-  'https://api3.binance.com',
-  'https://api4.binance.com'
-];
+const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || "0.0.0.0";
 
-const FUTURES_BASES = [
-  'https://fapi.binance.com',
-  'https://fapi1.binance.com',
-  'https://fapi2.binance.com',
-  'https://fapi3.binance.com',
-  'https://fapi4.binance.com'
-];
+const OKX_BASE = "https://www.okx.com";
 
-const history = [];
-const alerts = [];
+const SPOT_INST = "BTC-USDT";
+const SWAP_INST = "BTC-USDT-SWAP";
 
-let lastDashboard = null;
-let lastGoodPrice = null;
+const FRONTEND_DIR = path.join(__dirname, "frontend");
+
+// ------------------------------------------------------------
+// STATE / CACHE
+// ------------------------------------------------------------
+
+const cache = {
+  ticker: null,
+  candles: {},
+  oi: null,
+  funding: null,
+  index: null,
+  fearGreed: null,
+  dashboard: null,
+  lastUpdate: 0
+};
+
+const CACHE_MS = 8000;
+const CANDLE_CACHE_MS = 10000;
+
+const signalHistory = [];
+const MAX_HISTORY = 100;
+
+let lastGoodTicker = null;
+let lastGoodOI = null;
+let lastGoodFunding = null;
+
+// ------------------------------------------------------------
+// EXPRESS STATIC
+// ------------------------------------------------------------
+
+app.use(express.static(FRONTEND_DIR));
+
+// ------------------------------------------------------------
+// HELPERS
+// ------------------------------------------------------------
+
+function nowISO() {
+  return new Date().toISOString();
+}
 
 function num(v, fallback = null) {
   const n = Number(v);
@@ -46,1392 +72,1379 @@ function num(v, fallback = null) {
 }
 
 function clamp(v, min, max) {
-  return Math.min(max, Math.max(min, v));
+  return Math.max(min, Math.min(max, v));
 }
 
-function avg(arr) {
-  const a = arr.filter(Number.isFinite);
-  return a.length
-    ? a.reduce((x, y) => x + y, 0) / a.length
-    : null;
+function round(v, decimals = 2) {
+  if (!Number.isFinite(v)) return null;
+  const p = Math.pow(10, decimals);
+  return Math.round(v * p) / p;
 }
 
-function fmt(v, d = 2) {
-  return Number.isFinite(v) ? Number(v.toFixed(d)) : null;
-}
-
-async function fetchJson(url, options = {}, timeoutMs = 8000) {
+async function fetchJSON(url, options = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, options.timeout || 8000);
 
   try {
-    const res = await fetch(url, {
-      ...options,
-      signal: controller.signal,
+    const response = await fetch(url, {
+      method: "GET",
       headers: {
-        'User-Agent': 'BTC-AI-SCALPING-ENGINE-V5/1.0',
-        'Accept': 'application/json,text/plain,*/*',
-        ...(options.headers || {})
-      }
+        "Accept": "application/json",
+        "User-Agent": "BTC-AI-SCALPING-ENGINE-V4/1.0"
+      },
+      signal: controller.signal
     });
 
-    const text = await res.text();
+    const text = await response.text();
 
-    if (!res.ok) {
-      throw new Error(
-        `HTTP ${res.status} from ${new URL(url).hostname}`
-      );
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} from ${new URL(url).hostname}`);
     }
 
+    let json;
+
     try {
-      return JSON.parse(text);
+      json = JSON.parse(text);
     } catch {
-      throw new Error(
-        `Non-JSON response from ${new URL(url).hostname}`
-      );
+      throw new Error(`Non-JSON response from ${new URL(url).hostname}`);
     }
+
+    return json;
   } finally {
-    clearTimeout(timer);
+    clearTimeout(timeout);
   }
 }
 
-async function tryBases(bases, endpoint) {
-  let lastError = null;
+// ------------------------------------------------------------
+// OKX TICKER
+// ------------------------------------------------------------
 
-  for (const base of bases) {
-    try {
-      return await fetchJson(`${base}${endpoint}`);
-    } catch (e) {
-      lastError = e;
-    }
-  }
+async function getTicker() {
+  const url =
+    `${OKX_BASE}/api/v5/market/ticker?instId=${encodeURIComponent(SWAP_INST)}`;
 
-  throw lastError || new Error('All market data sources failed');
-}
-
-async function getSpot24h() {
-  return tryBases(
-    SPOT_BASES,
-    `/api/v3/ticker/24hr?symbol=${encodeURIComponent(SYMBOL)}`
-  );
-}
-
-async function getFutures24h() {
-  return tryBases(
-    FUTURES_BASES,
-    `/fapi/v1/ticker/24hr?symbol=${encodeURIComponent(SYMBOL)}`
-  );
-}
-
-async function getSpotKlines(interval = '5m', limit = 120) {
-  limit = clamp(
-    Math.floor(num(limit, 120)),
-    20,
-    500
-  );
-
-  return tryBases(
-    SPOT_BASES,
-    `/api/v3/klines?symbol=${SYMBOL}&interval=${encodeURIComponent(interval)}&limit=${limit}`
-  );
-}
-
-async function getOpenInterest() {
-  return tryBases(
-    FUTURES_BASES,
-    `/fapi/v1/openInterest?symbol=${SYMBOL}`
-  );
-}
-
-async function getFunding() {
-  return tryBases(
-    FUTURES_BASES,
-    `/fapi/v1/fundingRate?symbol=${SYMBOL}&limit=1`
-  );
-}
-
-async function getGlobalLongShort() {
   try {
-    return await tryBases(
-      FUTURES_BASES,
-      `/futures/data/globalLongShortAccountRatio?symbol=${SYMBOL}&period=5m&limit=1`
-    );
-  } catch {
-    return null;
+    const json = await fetchJSON(url);
+
+    if (json.code !== "0" || !Array.isArray(json.data) || !json.data[0]) {
+      throw new Error(json.msg || "OKX ticker unavailable");
+    }
+
+    const d = json.data[0];
+
+    const ticker = {
+      symbol: SWAP_INST,
+      lastPrice: num(d.last),
+      bid: num(d.bidPx),
+      ask: num(d.askPx),
+      high24h: num(d.high24h),
+      low24h: num(d.low24h),
+      open24h: num(d.open24h),
+      volume24h: num(d.vol24h),
+      volumeCcy24h: num(d.volCcy24h),
+      timestamp: num(d.ts),
+      source: "OKX public"
+    };
+
+    lastGoodTicker = ticker;
+    cache.ticker = {
+      data: ticker,
+      time: Date.now()
+    };
+
+    return ticker;
+  } catch (error) {
+    if (lastGoodTicker) {
+      return {
+        ...lastGoodTicker,
+        stale: true,
+        error: error.message
+      };
+    }
+
+    throw error;
   }
 }
 
-function candlesFromBinance(rows) {
-  return (Array.isArray(rows) ? rows : [])
-    .map(k => ({
-      time: Number(k[0]),
-      open: Number(k[1]),
-      high: Number(k[2]),
-      low: Number(k[3]),
-      close: Number(k[4]),
-      volume: Number(k[5])
+// ------------------------------------------------------------
+// OKX CANDLES
+// ------------------------------------------------------------
+
+function normalizeBar(bar) {
+  const allowed = [
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1H",
+    "2H",
+    "4H",
+    "6H",
+    "12H",
+    "1D"
+  ];
+
+  return allowed.includes(bar) ? bar : "5m";
+}
+
+async function getCandles(bar = "5m", limit = 100) {
+  bar = normalizeBar(bar);
+  limit = clamp(Number(limit) || 100, 20, 300);
+
+  const key = `${bar}_${limit}`;
+
+  if (
+    cache.candles[key] &&
+    Date.now() - cache.candles[key].time < CANDLE_CACHE_MS
+  ) {
+    return cache.candles[key].data;
+  }
+
+  const url =
+    `${OKX_BASE}/api/v5/market/candles` +
+    `?instId=${encodeURIComponent(SPOT_INST)}` +
+    `&bar=${encodeURIComponent(bar)}` +
+    `&limit=${limit}`;
+
+  const json = await fetchJSON(url);
+
+  if (json.code !== "0" || !Array.isArray(json.data)) {
+    throw new Error(json.msg || "OKX candles unavailable");
+  }
+
+  const candles = json.data
+    .map(row => ({
+      timestamp: num(row[0]),
+      open: num(row[1]),
+      high: num(row[2]),
+      low: num(row[3]),
+      close: num(row[4]),
+      volume: num(row[5], 0),
+      volumeCurrency: num(row[6], 0),
+      volumeQuote: num(row[7], 0),
+      confirmed: String(row[8]) === "1"
     }))
     .filter(x =>
-      [
-        x.open,
-        x.high,
-        x.low,
-        x.close,
-        x.volume
-      ].every(Number.isFinite)
-    );
+      Number.isFinite(x.timestamp) &&
+      Number.isFinite(x.open) &&
+      Number.isFinite(x.high) &&
+      Number.isFinite(x.low) &&
+      Number.isFinite(x.close)
+    )
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  cache.candles[key] = {
+    data: candles,
+    time: Date.now()
+  };
+
+  return candles;
 }
 
-function ema(values, period) {
-  if (values.length < period) return null;
+// ------------------------------------------------------------
+// OPEN INTEREST
+// ------------------------------------------------------------
 
-  let e = avg(values.slice(0, period));
+async function getOpenInterest() {
+  const url =
+    `${OKX_BASE}/api/v5/public/open-interest` +
+    `?instType=SWAP` +
+    `&instId=${encodeURIComponent(SWAP_INST)}`;
+
+  try {
+    const json = await fetchJSON(url);
+
+    if (json.code !== "0" || !Array.isArray(json.data) || !json.data[0]) {
+      throw new Error(json.msg || "OKX Open Interest unavailable");
+    }
+
+    const d = json.data[0];
+
+    const oi = {
+      symbol: SWAP_INST,
+      oi: num(d.oi),
+      oiCcy: num(d.oiCcy),
+      timestamp: num(d.ts),
+      source: "OKX public"
+    };
+
+    lastGoodOI = oi;
+
+    cache.oi = {
+      data: oi,
+      time: Date.now()
+    };
+
+    return oi;
+  } catch (error) {
+    if (lastGoodOI) {
+      return {
+        ...lastGoodOI,
+        stale: true,
+        error: error.message
+      };
+    }
+
+    throw error;
+  }
+}
+
+// ------------------------------------------------------------
+// FUNDING
+// ------------------------------------------------------------
+
+async function getFunding() {
+  const url =
+    `${OKX_BASE}/api/v5/public/funding-rate` +
+    `?instId=${encodeURIComponent(SWAP_INST)}`;
+
+  try {
+    const json = await fetchJSON(url);
+
+    if (json.code !== "0" || !Array.isArray(json.data) || !json.data[0]) {
+      throw new Error(json.msg || "OKX Funding unavailable");
+    }
+
+    const d = json.data[0];
+
+    const funding = {
+      symbol: SWAP_INST,
+      fundingRate: num(d.fundingRate),
+      fundingRatePercent:
+        num(d.fundingRate) !== null
+          ? num(d.fundingRate) * 100
+          : null,
+      nextFundingTime: num(d.nextFundingTime),
+      fundingTime: num(d.fundingTime),
+      source: "OKX public"
+    };
+
+    lastGoodFunding = funding;
+
+    cache.funding = {
+      data: funding,
+      time: Date.now()
+    };
+
+    return funding;
+  } catch (error) {
+    if (lastGoodFunding) {
+      return {
+        ...lastGoodFunding,
+        stale: true,
+        error: error.message
+      };
+    }
+
+    throw error;
+  }
+}
+
+// ------------------------------------------------------------
+// INDEX PRICE
+// ------------------------------------------------------------
+
+async function getIndexPrice() {
+  const url =
+    `${OKX_BASE}/api/v5/market/index-tickers` +
+    `?instId=BTC-USDT`;
+
+  try {
+    const json = await fetchJSON(url);
+
+    if (json.code !== "0" || !Array.isArray(json.data) || !json.data[0]) {
+      throw new Error(json.msg || "Index price unavailable");
+    }
+
+    const d = json.data[0];
+
+    const result = {
+      indexPrice: num(d.idxPx),
+      timestamp: num(d.ts),
+      source: "OKX public"
+    };
+
+    cache.index = {
+      data: result,
+      time: Date.now()
+    };
+
+    return result;
+  } catch {
+    return cache.index ? cache.index.data : null;
+  }
+}
+
+// ------------------------------------------------------------
+// TECHNICAL INDICATORS
+// ------------------------------------------------------------
+
+function calculateEMA(values, period) {
+  if (!values.length) return null;
+
   const k = 2 / (period + 1);
 
-  for (let i = period; i < values.length; i++) {
-    e = values[i] * k + e * (1 - k);
+  let ema = values[0];
+
+  for (let i = 1; i < values.length; i++) {
+    ema = values[i] * k + ema * (1 - k);
   }
 
-  return e;
+  return ema;
 }
 
-function rsi(values, period = 14) {
+function calculateRSI(values, period = 14) {
   if (values.length < period + 1) return null;
 
   let gains = 0;
   let losses = 0;
 
   for (let i = 1; i <= period; i++) {
-    const d = values[i] - values[i - 1];
+    const diff = values[i] - values[i - 1];
 
-    if (d >= 0) {
-      gains += d;
-    } else {
-      losses -= d;
-    }
+    if (diff >= 0) gains += diff;
+    else losses += Math.abs(diff);
   }
 
-  let ag = gains / period;
-  let al = losses / period;
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
 
   for (let i = period + 1; i < values.length; i++) {
-    const d = values[i] - values[i - 1];
+    const diff = values[i] - values[i - 1];
 
-    ag =
-      ((ag * (period - 1)) + Math.max(d, 0))
-      / period;
+    const gain = diff > 0 ? diff : 0;
+    const loss = diff < 0 ? Math.abs(diff) : 0;
 
-    al =
-      ((al * (period - 1)) + Math.max(-d, 0))
-      / period;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
   }
 
-  if (al === 0) return 100;
+  if (avgLoss === 0) return 100;
 
-  return 100 - (100 / (1 + ag / al));
+  const rs = avgGain / avgLoss;
+
+  return 100 - 100 / (1 + rs);
 }
 
-function atr(candles, period = 14) {
+function calculateVWAP(candles) {
+  if (!candles.length) return null;
+
+  let cumulativePV = 0;
+  let cumulativeVolume = 0;
+
+  for (const c of candles) {
+    const typical = (c.high + c.low + c.close) / 3;
+
+    cumulativePV += typical * (c.volume || 0);
+    cumulativeVolume += c.volume || 0;
+  }
+
+  if (cumulativeVolume === 0) return null;
+
+  return cumulativePV / cumulativeVolume;
+}
+
+function calculateATR(candles, period = 14) {
   if (candles.length < period + 1) return null;
 
   const trs = [];
 
   for (let i = 1; i < candles.length; i++) {
     const c = candles[i];
-    const p = candles[i - 1];
+    const prev = candles[i - 1];
 
-    trs.push(
-      Math.max(
-        c.high - c.low,
-        Math.abs(c.high - p.close),
-        Math.abs(c.low - p.close)
-      )
+    const tr = Math.max(
+      c.high - c.low,
+      Math.abs(c.high - prev.close),
+      Math.abs(c.low - prev.close)
     );
+
+    trs.push(tr);
   }
 
-  return avg(trs.slice(-period));
+  const recent = trs.slice(-period);
+
+  return recent.reduce((a, b) => a + b, 0) / recent.length;
 }
 
-function sessionVwap(candles) {
-  let pv = 0;
-  let vol = 0;
-
-  for (const c of candles) {
-    const typical =
-      (c.high + c.low + c.close) / 3;
-
-    pv += typical * c.volume;
-    vol += c.volume;
-  }
-
-  return vol ? pv / vol : null;
-}
-
-function volumeRatio(candles, period = 20) {
+function calculateVolumeRatio(candles, period = 20) {
   if (candles.length < period + 1) return null;
 
-  const current =
-    candles[candles.length - 1].volume;
+  const recent = candles.slice(-period - 1);
 
-  const base = avg(
-    candles
-      .slice(-period - 1, -1)
-      .map(c => c.volume)
-  );
+  const current = recent[recent.length - 1].volume || 0;
 
-  return base ? current / base : null;
+  const previous = recent
+    .slice(0, -1)
+    .map(x => x.volume || 0);
+
+  const avg =
+    previous.reduce((a, b) => a + b, 0) /
+    Math.max(previous.length, 1);
+
+  if (!avg) return null;
+
+  return current / avg;
 }
 
-function timeframeAnalysis(candles) {
-  const closes = candles.map(c => c.close);
+// ------------------------------------------------------------
+// MARKET ANALYSIS
+// ------------------------------------------------------------
 
-  const price = closes.at(-1);
+function buildTechnical(candles, ticker) {
+  const closes = candles.map(x => x.close);
 
-  const e20 = ema(closes, 20);
-  const e50 = ema(closes, 50);
+  const price =
+    ticker?.lastPrice ??
+    closes[closes.length - 1] ??
+    null;
 
-  const r = rsi(closes, 14);
-  const vwap = sessionVwap(candles);
+  const rsi = calculateRSI(closes, 14);
+  const ema20 = calculateEMA(closes, 20);
+  const ema50 = calculateEMA(closes, 50);
+  const vwap = calculateVWAP(candles);
+  const atr = calculateATR(candles, 14);
+  const volumeRatio = calculateVolumeRatio(candles, 20);
 
-  const a = atr(candles, 14);
-  const vr = volumeRatio(candles, 20);
+  let trend = "MIXED";
 
-  let score = 50;
-
-  if (e20 != null) {
-    score += price > e20 ? 12 : -12;
+  if (
+    price !== null &&
+    ema20 !== null &&
+    ema50 !== null
+  ) {
+    if (price > ema20 && ema20 > ema50) {
+      trend = "BULLISH";
+    } else if (price < ema20 && ema20 < ema50) {
+      trend = "BEARISH";
+    }
   }
 
-  if (e50 != null) {
-    score += price > e50 ? 13 : -13;
+  let vwapBias = "NEUTRAL";
+
+  if (price !== null && vwap !== null) {
+    if (price > vwap) vwapBias = "ABOVE VWAP";
+    if (price < vwap) vwapBias = "BELOW VWAP";
   }
 
-  if (r != null) {
-    if (r > 55 && r < 75) score += 5;
-    if (r < 45 && r > 25) score -= 5;
-    if (r > 80) score -= 5;
-    if (r < 20) score += 5;
+  return {
+    price: round(price, 2),
+    rsi: round(rsi, 2),
+    ema20: round(ema20, 2),
+    ema50: round(ema50, 2),
+    vwap: round(vwap, 2),
+    atr: round(atr, 2),
+    volumeRatio: round(volumeRatio, 3),
+    trend,
+    vwapBias
+  };
+}
+
+// ------------------------------------------------------------
+// SIGNAL ENGINE 0-100
+// ------------------------------------------------------------
+
+function buildSignal(technical, oi, funding, ticker) {
+  const components = {};
+
+  let bullish = 0;
+  let bearish = 0;
+
+  // PRICE STRUCTURE — 15
+  let priceStructure = 7.5;
+
+  if (technical.trend === "BULLISH") {
+    priceStructure = 15;
+    bullish += 15;
+  } else if (technical.trend === "BEARISH") {
+    priceStructure = 0;
+    bearish += 15;
+  } else {
+    bullish += 7.5;
+    bearish += 7.5;
   }
+
+  components.priceStructure = {
+    score: round(priceStructure, 1),
+    label: technical.trend
+  };
+
+  // RSI — 10
+  let rsiScore = 5;
+
+  if (technical.rsi !== null) {
+    if (technical.rsi >= 55 && technical.rsi < 70) {
+      bullish += 10;
+      rsiScore = 10;
+    } else if (technical.rsi <= 45 && technical.rsi > 30) {
+      bearish += 10;
+      rsiScore = 0;
+    } else if (technical.rsi >= 70) {
+      bullish += 5;
+      rsiScore = 5;
+    } else if (technical.rsi <= 30) {
+      bearish += 5;
+      rsiScore = 5;
+    } else {
+      bullish += 5;
+      bearish += 5;
+    }
+  } else {
+    bullish += 5;
+    bearish += 5;
+  }
+
+  components.rsi = {
+    score: rsiScore,
+    value: technical.rsi
+  };
+
+  // EMA + VWAP — 10
+  let emaVwapScore = 5;
+
+  if (
+    technical.price !== null &&
+    technical.ema20 !== null &&
+    technical.vwap !== null
+  ) {
+    if (
+      technical.price > technical.ema20 &&
+      technical.price > technical.vwap
+    ) {
+      bullish += 10;
+      emaVwapScore = 10;
+    } else if (
+      technical.price < technical.ema20 &&
+      technical.price < technical.vwap
+    ) {
+      bearish += 10;
+      emaVwapScore = 0;
+    } else {
+      bullish += 5;
+      bearish += 5;
+    }
+  } else {
+    bullish += 5;
+    bearish += 5;
+  }
+
+  components.emaVwap = {
+    score: emaVwapScore,
+    label: technical.vwapBias
+  };
+
+  // VOLUME — 10
+  let volumeScore = 5;
+
+  if (technical.volumeRatio !== null) {
+    if (technical.volumeRatio >= 1.5) {
+      if (technical.trend === "BULLISH") {
+        bullish += 10;
+        volumeScore = 10;
+      } else if (technical.trend === "BEARISH") {
+        bearish += 10;
+        volumeScore = 0;
+      } else {
+        bullish += 5;
+        bearish += 5;
+      }
+    } else {
+      bullish += 5;
+      bearish += 5;
+    }
+  } else {
+    bullish += 5;
+    bearish += 5;
+  }
+
+  components.volume = {
+    score: volumeScore,
+    ratio: technical.volumeRatio
+  };
+
+  // OPEN INTEREST — 15
+  // Without historical OI we deliberately do not fake direction.
+  let oiScore = 7.5;
+
+  if (oi && oi.oi !== null) {
+    bullish += 7.5;
+    bearish += 7.5;
+    oiScore = 7.5;
+  } else {
+    bullish += 7.5;
+    bearish += 7.5;
+  }
+
+  components.openInterest = {
+    score: oiScore,
+    value: oi?.oi ?? null,
+    status: oi ? "LIVE" : "UNAVAILABLE"
+  };
+
+  // FUNDING — 5
+  let fundingScore = 2.5;
+
+  if (funding && funding.fundingRate !== null) {
+    const rate = funding.fundingRate;
+
+    if (rate > 0.0005) {
+      bearish += 5;
+      fundingScore = 0;
+    } else if (rate < -0.0005) {
+      bullish += 5;
+      fundingScore = 5;
+    } else {
+      bullish += 2.5;
+      bearish += 2.5;
+    }
+  } else {
+    bullish += 2.5;
+    bearish += 2.5;
+  }
+
+  components.funding = {
+    score: fundingScore,
+    rate: funding?.fundingRate ?? null,
+    percent: funding?.fundingRatePercent ?? null
+  };
+
+  // LIQUIDATION / DERIVATIVES — 10
+  // No fake liquidation data.
+  const liquidationScore = 5;
+
+  bullish += 5;
+  bearish += 5;
+
+  components.liquidation = {
+    score: liquidationScore,
+    label: "NO LIVE LIQUIDATION FEED"
+  };
+
+  // LARGE TRADES / WHALE — 10
+  const whaleScore = 5;
+
+  bullish += 5;
+  bearish += 5;
+
+  components.largeTrades = {
+    score: whaleScore,
+    label: "NO LIVE WHALE FEED"
+  };
+
+  // TOTAL
+  const rawBull = bullish;
+  const rawBear = bearish;
+
+  const total = 75;
+
+  const bullPercent = (rawBull / total) * 100;
+  const bearPercent = (rawBear / total) * 100;
+
+  let score = Math.round(
+    50 + (bullPercent - bearPercent) / 2
+  );
 
   score = clamp(score, 0, 100);
 
-  return {
-    price: fmt(price),
-    rsi: fmt(r),
-    ema20: fmt(e20),
-    ema50: fmt(e50),
-    vwap: fmt(vwap),
-    atr: fmt(a),
-    volumeRatio: fmt(vr, 3),
+  let action = "WAIT";
+  let label = "WAIT";
 
-    trend:
-      score >= 60
-        ? 'BULLISH'
-        : score <= 40
-          ? 'BEARISH'
-          : 'MIXED',
-
-    vwapBias:
-      vwap == null
-        ? 'UNKNOWN'
-        : price > vwap
-          ? 'ABOVE VWAP'
-          : 'BELOW VWAP',
-
-    score: Math.round(score)
-  };
-}
-
-function buildSignal(tf, derivatives = {}) {
-  const f = tf['5m'] || {};
-  const h1 = tf['1h'] || {};
-  const m15 = tf['15m'] || {};
-
-  const price = f.price;
-
-  if (!Number.isFinite(price)) {
-    return {
-      score: 0,
-      buyScore: 0,
-      sellScore: 0,
-      action: 'WAIT',
-      label: 'WAIT',
-      confidence: 0,
-      entry: null,
-      stopLoss: null,
-      target1: null,
-      target2: null,
-      holdingWindow: 'WAIT',
-      reason: 'Live price unavailable',
-      coverage: 0,
-      components: {},
-      weights: {}
-    };
+  if (score >= 65) {
+    action = "LONG";
+    label = "BULLISH";
+  } else if (score <= 35) {
+    action = "SHORT";
+    label = "BEARISH";
   }
 
-  let buy = 0;
-  let sell = 0;
-
-  const components = {};
-
-  const weights = {
-    priceStructure: 15,
-    rsi: 10,
-    emaVwap: 10,
-    volume: 10,
-    openInterest: 15,
-    funding: 5,
-    liquidation: 10,
-    largeTrades: 10,
-    fearGreed: 5
-  };
-
-  const ps = clamp(
-    (
-      (h1.score || 50) * 0.45 +
-      (m15.score || 50) * 0.30 +
-      (f.score || 50) * 0.25
-    ),
-    0,
-    100
+  const confidence = Math.round(
+    Math.abs(score - 50) * 2
   );
 
-  buy += ps * 0.15;
-  sell += (100 - ps) * 0.15;
-
-  components.priceStructure =
-    Math.round(ps);
-
-  const r = f.rsi;
-
-  const rScore =
-    r == null
-      ? 50
-      : r <= 35
-        ? 75
-        : r >= 65
-          ? 25
-          : 50 + (50 - r);
-
-  buy += rScore * 0.10;
-  sell += (100 - rScore) * 0.10;
-
-  components.rsi =
-    Math.round(rScore);
-
-  const ev =
-    f.ema20 != null &&
-    f.ema50 != null
-      ? (
-          f.price > f.ema20 &&
-          f.ema20 > f.ema50
-            ? 85
-            : f.price < f.ema20 &&
-              f.ema20 < f.ema50
-              ? 15
-              : 50
-        )
-      : 50;
-
-  const vw =
-    f.vwapBias === 'ABOVE VWAP'
-      ? 70
-      : f.vwapBias === 'BELOW VWAP'
-        ? 30
-        : 50;
-
-  const emaVwap =
-    (ev + vw) / 2;
-
-  buy += emaVwap * 0.10;
-  sell += (100 - emaVwap) * 0.10;
-
-  components.emaVwap =
-    Math.round(emaVwap);
-
-  const vr = f.volumeRatio;
-
-  const volScore =
-    vr == null
-      ? 50
-      : clamp(
-          50 + (vr - 1) * 35,
-          20,
-          90
-        );
-
-  buy += volScore * 0.10;
-  sell += (100 - volScore) * 0.10;
-
-  components.volume =
-    Math.round(volScore);
-
-  const oiScore =
-    derivatives.oi != null
-      ? 60
-      : 50;
-
-  const fundScore =
-    derivatives.funding != null
-      ? clamp(
-          Math.round(
-            50 -
-            derivatives.funding * 100000
-          ),
-          10,
-          90
-        )
-      : 50;
-
-  const lsScore =
-    derivatives.longShort != null
-      ? clamp(
-          Math.round(
-            50 +
-            (derivatives.longShort - 1) * 80
-          ),
-          10,
-          90
-        )
-      : 50;
-
-  components.openInterest = oiScore;
-  components.funding = fundScore;
-  components.liquidation = 50;
-  components.largeTrades = lsScore;
-  components.fearGreed = 50;
-
-  buy += oiScore * 0.15;
-  buy += fundScore * 0.05;
-  buy += 50 * 0.10;
-  buy += lsScore * 0.10;
-  buy += 50 * 0.05;
-
-  sell += (100 - oiScore) * 0.15;
-  sell += (100 - fundScore) * 0.05;
-  sell += 50 * 0.10;
-  sell += (100 - lsScore) * 0.10;
-  sell += 50 * 0.05;
-
-  const buyScore =
-    Math.round(clamp(buy, 0, 100));
-
-  const sellScore =
-    Math.round(clamp(sell, 0, 100));
-
-  const score =
-    Math.max(buyScore, sellScore);
-
-  const action =
-    score >= 68
-      ? (
-          buyScore > sellScore
-            ? 'LONG'
-            : 'SHORT'
-        )
-      : 'WAIT';
-
-  const atrVal =
-    f.atr || price * 0.002;
-
+  // ENTRY / SL / TARGETS
+  let entry = technical.price;
   let stopLoss = null;
   let target1 = null;
   let target2 = null;
 
-  if (action === 'LONG') {
-    stopLoss =
-      price - atrVal * 1.2;
+  const atr =
+    technical.atr ||
+    (technical.price ? technical.price * 0.003 : null);
 
-    target1 =
-      price + atrVal * 1.5;
-
-    target2 =
-      price + atrVal * 2.5;
-  }
-
-  if (action === 'SHORT') {
-    stopLoss =
-      price + atrVal * 1.2;
-
-    target1 =
-      price - atrVal * 1.5;
-
-    target2 =
-      price - atrVal * 2.5;
-  }
-
-  const coverage =
-    Math.round(
-      Object.values(components)
-        .filter(v => v !== 50)
-        .length
-      / 9 * 100
-    );
-
-  return {
-    score,
-    buyScore,
-    sellScore,
-
-    action,
-
-    label:
-      action === 'LONG'
-        ? 'BUY'
-        : action === 'SHORT'
-          ? 'SELL'
-          : 'WAIT',
-
-    confidence: score,
-
-    coverage,
-
-    entry: fmt(price),
-    stopLoss: fmt(stopLoss),
-    target1: fmt(target1),
-    target2: fmt(target2),
-
-    holdingWindow:
-      action === 'WAIT'
-        ? 'Wait for confirmation'
-        : '5–30 min',
-
-    reason:
-      action === 'WAIT'
-        ? 'Trend/confirmation not strong enough'
-        : 'Multi-factor technical alignment',
-
-    components,
-    weights
-  };
-}
-
-async function buildDashboard() {
-  const intervals = [
-    '1m',
-    '5m',
-    '15m',
-    '1h'
-  ];
-
-  const pairs =
-    await Promise.all(
-      intervals.map(
-        async interval => {
-          try {
-            const rows =
-              await getSpotKlines(
-                interval,
-                120
-              );
-
-            return [
-              interval,
-              timeframeAnalysis(
-                candlesFromBinance(rows)
-              )
-            ];
-          } catch {
-            return [
-              interval,
-              {}
-            ];
-          }
-        }
-      )
-    );
-
-  const tf =
-    Object.fromEntries(pairs);
-
-  const errors = {};
-
-  let priceData = null;
-
-  try {
-    priceData =
-      await getSpot24h();
-  } catch (e) {
-
-    try {
-      priceData =
-        await getFutures24h();
-    } catch (e2) {
-      errors.marketData =
-        e2.message;
+  if (entry !== null && atr !== null) {
+    if (action === "LONG") {
+      stopLoss = entry - atr * 1.2;
+      target1 = entry + atr * 1.5;
+      target2 = entry + atr * 2.5;
+    } else if (action === "SHORT") {
+      stopLoss = entry + atr * 1.2;
+      target1 = entry - atr * 1.5;
+      target2 = entry - atr * 2.5;
     }
   }
 
-  let oi = null;
-  let funding = null;
-  let ratio = null;
+  const dataCoverage = {
+    price: Boolean(ticker?.lastPrice),
+    candles: true,
+    openInterest: Boolean(oi),
+    funding: Boolean(funding),
+    liquidation: false,
+    largeTrades: false
+  };
 
-  try {
-    oi =
-      await getOpenInterest();
-  } catch (e) {
-    errors.openInterest =
-      e.message;
+  const coverage = Math.round(
+    (
+      Object.values(dataCoverage)
+        .filter(Boolean).length /
+      Object.values(dataCoverage).length
+    ) * 100
+  );
+
+  // If essential derivatives data is missing, don't generate a
+  // strong directional signal.
+  if (!oi || !funding) {
+    action = "WAIT";
+    label = "WAIT";
   }
-
-  try {
-    funding =
-      await getFunding();
-  } catch (e) {
-    errors.funding =
-      e.message;
-  }
-
-  try {
-    ratio =
-      await getGlobalLongShort();
-  } catch {}
-
-  const price =
-    num(
-      priceData?.lastPrice,
-      tf['5m']?.price
-    );
-
-  if (price != null) {
-    lastGoodPrice = price;
-  }
-
-  const oiValue =
-    num(oi?.openInterest);
-
-  const fundingRate =
-    num(
-      Array.isArray(funding)
-        ? funding[0]?.fundingRate
-        : funding?.fundingRate
-    );
-
-  const longShort =
-    num(
-      Array.isArray(ratio)
-        ? ratio[0]?.longShortRatio
-        : ratio?.longShortRatio
-    );
-
-  const signal =
-    buildSignal(
-      tf,
-      {
-        oi: oiValue,
-        funding: fundingRate,
-        longShort
-      }
-    );
 
   return {
+    score,
+    confidence,
+    action,
+    label,
 
-    ok:
-      Object.keys(errors).length === 0,
+    entry: round(entry, 2),
+    stopLoss: round(stopLoss, 2),
+    target1: round(target1, 2),
+    target2: round(target2, 2),
 
-    timestamp:
-      new Date().toISOString(),
+    holdingWindow:
+      action === "LONG" || action === "SHORT"
+        ? "5–30 min"
+        : "Wait for confirmation",
 
-    source:
-      'Binance public',
+    coverage,
+
+    bullScore: round(rawBull, 1),
+    bearScore: round(rawBear, 1),
+
+    components,
+
+    reason:
+      action === "WAIT"
+        ? "Live confirmation/data coverage is insufficient."
+        : `${label} setup based on price structure, RSI, EMA/VWAP and volume.`,
+
+    dataCoverage
+  };
+}
+
+// ------------------------------------------------------------
+// FEAR & GREED
+// ------------------------------------------------------------
+
+async function getFearGreed() {
+  if (
+    cache.fearGreed &&
+    Date.now() - cache.fearGreed.time < 60000
+  ) {
+    return cache.fearGreed.data;
+  }
+
+  try {
+    const json = await fetchJSON(
+      "https://api.alternative.me/fng/?limit=1"
+    );
+
+    const d = json?.data?.[0];
+
+    if (!d) throw new Error("Fear & Greed unavailable");
+
+    const result = {
+      value: num(d.value),
+      classification: d.value_classification || null,
+      timestamp: num(d.timestamp),
+      source: "Alternative.me"
+    };
+
+    cache.fearGreed = {
+      data: result,
+      time: Date.now()
+    };
+
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+// ------------------------------------------------------------
+// DASHBOARD
+// ------------------------------------------------------------
+
+async function buildDashboard() {
+  const errors = {};
+
+  let ticker = null;
+  let candles = [];
+  let oi = null;
+  let funding = null;
+  let index = null;
+  let fearGreed = null;
+
+  try {
+    ticker = await getTicker();
+  } catch (e) {
+    errors.marketData = e.message;
+  }
+
+  try {
+    candles = await getCandles("5m", 100);
+  } catch (e) {
+    errors.candles = e.message;
+  }
+
+  try {
+    oi = await getOpenInterest();
+  } catch (e) {
+    errors.openInterest = e.message;
+  }
+
+  try {
+    funding = await getFunding();
+  } catch (e) {
+    errors.funding = e.message;
+  }
+
+  try {
+    index = await getIndexPrice();
+  } catch {
+    index = null;
+  }
+
+  try {
+    fearGreed = await getFearGreed();
+  } catch {
+    fearGreed = null;
+  }
+
+  if (!ticker && !candles.length) {
+    return {
+      ok: false,
+      timestamp: nowISO(),
+      source: "OKX public",
+      error: "Live market data unavailable",
+      errors
+    };
+  }
+
+  const technical = buildTechnical(candles, ticker);
+
+  const signal = buildSignal(
+    technical,
+    oi,
+    funding,
+    ticker
+  );
+
+  const dashboard = {
+    ok: true,
+
+    timestamp: nowISO(),
+
+    source: "OKX public",
 
     btc: {
-      symbol: SYMBOL,
-
-      price:
-        fmt(price),
-
+      symbol: "BTCUSDT",
+      price: technical.price,
+      markPrice: technical.price,
+      indexPrice: index?.indexPrice ?? null,
       change24h:
-        fmt(
-          num(
-            priceData?.priceChangePercent
-          ),
-          3
-        ),
-
-      volume24h:
-        fmt(
-          num(priceData?.volume),
-          4
-        ),
-
-      turnover24h:
-        fmt(
-          num(priceData?.quoteVolume),
-          2
-        )
+        ticker?.open24h && ticker?.lastPrice
+          ? round(
+              ((ticker.lastPrice - ticker.open24h) /
+                ticker.open24h) *
+                100,
+              3
+            )
+          : null,
+      high24h: ticker?.high24h ?? null,
+      low24h: ticker?.low24h ?? null,
+      volume24h: ticker?.volume24h ?? null,
+      turnover24h: ticker?.volumeCcy24h ?? null
     },
 
-    timeframes: tf,
+    timeframes: {
+      "1m": {
+        status: "AVAILABLE",
+        endpoint: "/api/candles?bar=1m"
+      },
+      "5m": {
+        status: "AVAILABLE",
+        endpoint: "/api/candles?bar=5m"
+      },
+      "15m": {
+        status: "AVAILABLE",
+        endpoint: "/api/candles?bar=15m"
+      },
+      "30m": {
+        status: "AVAILABLE",
+        endpoint: "/api/candles?bar=30m"
+      },
+      "1h": {
+        status: "AVAILABLE",
+        endpoint: "/api/candles?bar=1H"
+      }
+    },
+
+    technical,
 
     openInterest: {
-      btc: oiValue,
-      usd: null,
-      change5m: null,
-      change30m: null,
-      change1h: null,
-
-      source:
-        oiValue != null
-          ? 'Binance Futures'
-          : 'unavailable'
+      btc: oi?.oi ?? null,
+      usd: oi?.oiCcy ?? null,
+      timestamp: oi?.timestamp ?? null,
+      source: oi?.source ?? null,
+      status: oi ? "LIVE" : "UNAVAILABLE"
     },
 
     funding: {
-      rate: fundingRate,
-
-      ratePct:
-        fundingRate != null
-          ? fmt(
-              fundingRate * 100,
-              5
-            )
-          : null,
-
-      nextFundingTime: null,
-
-      source:
-        fundingRate != null
-          ? 'Binance Futures'
-          : 'unavailable'
+      rate: funding?.fundingRate ?? null,
+      ratePercent:
+        funding?.fundingRatePercent ?? null,
+      nextFundingTime:
+        funding?.nextFundingTime ?? null,
+      status: funding ? "LIVE" : "UNAVAILABLE"
     },
 
     liquidation: {
       total: null,
       long1h: null,
       short1h: null,
-      events: 0,
-      bias: 'UNAVAILABLE'
+      bias: "UNAVAILABLE",
+      source: "No liquidation API connected"
     },
 
     largeTrades: {
-      count: 0,
+      count: null,
       buyUsd: null,
       sellUsd: null,
       netUsd: null,
-      bias: 'UNAVAILABLE'
+      bias: "UNAVAILABLE",
+      source: "No whale feed connected"
     },
+
+    fearGreed,
 
     macro: {
-      fearGreed: null,
-      indices: {},
-      etf: {},
-      note:
-        'Optional macro feeds not connected'
-    },
-
-    fearGreed: {
-      value: null,
-      classification: 'Unavailable',
-      source:
-        'Alternative.me public'
+      source: "Not connected",
+      status: "OPTIONAL"
     },
 
     sessions: {
-      india: 'ACTIVE CHECK',
-      usa: 'ACTIVE CHECK',
-      china: 'ACTIVE CHECK',
-
-      note:
-        'Session display only'
+      india: "ACTIVE CHECK",
+      usa: "ACTIVE CHECK",
+      asia: "ACTIVE CHECK",
+      note: "Regular-session clock display only"
     },
 
     signal,
 
-    components:
-      signal.components,
-
-    weights:
-      signal.weights,
+    weights: {
+      priceStructure: 15,
+      rsi: 10,
+      emaVwap: 10,
+      volume: 10,
+      openInterest: 15,
+      funding: 5,
+      liquidation: 10,
+      largeTrades: 10,
+      fearGreed: 5
+    },
 
     errors
   };
+
+  cache.dashboard = {
+    data: dashboard,
+    time: Date.now()
+  };
+
+  return dashboard;
 }
 
-function pushHistory(dashboard) {
+// ------------------------------------------------------------
+// API: HEALTH
+// ------------------------------------------------------------
+
+app.get("/api/health", (req, res) => {
+  res.json({
+    ok: true,
+    service: "BTC/USD AI SCALPING ENGINE V4",
+    time: nowISO(),
+    websocket: {
+      connected: wss.clients.size > 0,
+      clients: wss.clients.size
+    },
+    provider: "OKX public",
+    uptime: process.uptime(),
+    node: process.version
+  });
+});
+
+// ------------------------------------------------------------
+// API: PRICE
+// ------------------------------------------------------------
+
+app.get("/api/price", async (req, res) => {
+  try {
+    const ticker = await getTicker();
+
+    res.json({
+      symbol: "BTCUSDT",
+      lastPrice: ticker.lastPrice,
+      markPrice: ticker.lastPrice,
+      indexPrice: cache.index?.data?.indexPrice ?? null,
+      high24h: ticker.high24h,
+      low24h: ticker.low24h,
+      volume24h: ticker.volume24h,
+      turnover24h: ticker.volumeCcy24h,
+      source: ticker.source,
+      stale: Boolean(ticker.stale),
+      error: ticker.error || null
+    });
+  } catch (error) {
+    res.status(200).json({
+      error: error.message
+    });
+  }
+});
+
+// ------------------------------------------------------------
+// API: CANDLES
+// ------------------------------------------------------------
+
+app.get("/api/candles", async (req, res) => {
+  try {
+    const bar = normalizeBar(req.query.bar || "5m");
+    const limit = clamp(
+      Number(req.query.limit) || 100,
+      20,
+      300
+    );
+
+    const candles = await getCandles(bar, limit);
+
+    res.json({
+      ok: true,
+      symbol: SPOT_INST,
+      bar,
+      count: candles.length,
+      source: "OKX public",
+      candles
+    });
+  } catch (error) {
+    res.status(200).json({
+      ok: false,
+      error: error.message
+    });
+  }
+});
+
+// ------------------------------------------------------------
+// API: OPEN INTEREST
+// ------------------------------------------------------------
+
+app.get("/api/oi", async (req, res) => {
+  try {
+    const oi = await getOpenInterest();
+
+    res.json({
+      ok: true,
+      symbol: "BTCUSDT",
+      oi: oi.oi,
+      oiCcy: oi.oiCcy,
+      timestamp: oi.timestamp,
+      source: oi.source,
+      stale: Boolean(oi.stale),
+      error: oi.error || null
+    });
+  } catch (error) {
+    res.status(200).json({
+      ok: false,
+      error: error.message
+    });
+  }
+});
+
+// ------------------------------------------------------------
+// API: FUNDING
+// ------------------------------------------------------------
+
+app.get("/api/funding", async (req, res) => {
+  try {
+    const funding = await getFunding();
+
+    res.json({
+      ok: true,
+      symbol: "BTCUSDT",
+      fundingRate: funding.fundingRate,
+      fundingRatePercent:
+        funding.fundingRatePercent,
+      nextFundingTime:
+        funding.nextFundingTime,
+      fundingTime:
+        funding.fundingTime,
+      source: funding.source,
+      stale: Boolean(funding.stale),
+      error: funding.error || null
+    });
+  } catch (error) {
+    res.status(200).json({
+      ok: false,
+      error: error.message
+    });
+  }
+});
+
+// ------------------------------------------------------------
+// API: DASHBOARD
+// ------------------------------------------------------------
+
+app.get("/api/dashboard", async (req, res) => {
+  try {
+    const dashboard = await buildDashboard();
+
+    res.json(dashboard);
+
+    // Broadcast live dashboard to WebSocket clients
+    broadcast({
+      type: "dashboard",
+      data: dashboard
+    });
+
+    recordSignal(dashboard);
+
+  } catch (error) {
+    res.status(200).json({
+      ok: false,
+      timestamp: nowISO(),
+      error: error.message
+    });
+  }
+});
+
+// ------------------------------------------------------------
+// SIGNAL HISTORY
+// ------------------------------------------------------------
+
+function recordSignal(dashboard) {
   if (!dashboard?.signal) return;
 
-  const s =
-    dashboard.signal;
+  const s = dashboard.signal;
 
   const item = {
-    id:
-      `${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 7)}`,
-
-    timestamp:
-      dashboard.timestamp,
-
-    action:
-      s.action,
-
-    score:
-      s.score,
-
-    buyScore:
-      s.buyScore,
-
-    sellScore:
-      s.sellScore,
-
-    entry:
-      s.entry,
-
-    stopLoss:
-      s.stopLoss,
-
-    target1:
-      s.target1,
-
-    target2:
-      s.target2,
-
+    id: Date.now().toString(),
+    timestamp: dashboard.timestamp,
+    action: s.action,
+    label: s.label,
+    score: s.score,
+    confidence: s.confidence,
+    entry: s.entry,
+    stopLoss: s.stopLoss,
+    target1: s.target1,
+    target2: s.target2,
     read: false
   };
 
-  const last =
-    history[0];
+  const last = signalHistory[0];
 
   if (
-    !last ||
-    last.action !== item.action ||
-    Math.abs(
-      last.score - item.score
-    ) >= 5
+    last &&
+    last.action === item.action &&
+    last.score === item.score
   ) {
+    return;
+  }
 
-    history.unshift(item);
+  signalHistory.unshift(item);
 
-    if (history.length > 100) {
-      history.pop();
-    }
+  while (signalHistory.length > MAX_HISTORY) {
+    signalHistory.pop();
   }
 }
 
-function broadcast(payload) {
-  const text =
-    JSON.stringify(payload);
+app.get("/api/history", (req, res) => {
+  res.json({
+    ok: true,
+    count: signalHistory.length,
+    history: signalHistory
+  });
+});
 
-  for (
-    const client of wss.clients
-  ) {
+app.post("/api/history/:id/read", (req, res) => {
+  const item = signalHistory.find(
+    x => x.id === req.params.id
+  );
 
-    if (
-      client.readyState ===
-      WebSocket.OPEN
-    ) {
-      client.send(text);
-    }
-  }
-}
-
-async function refresh() {
-  try {
-
-    const d =
-      await buildDashboard();
-
-    lastDashboard = d;
-
-    pushHistory(d);
-
-    broadcast({
-      type: 'dashboard',
-      data: d
-    });
-
-  } catch (e) {
-
-    broadcast({
-      type: 'error',
-      error: e.message
+  if (!item) {
+    return res.status(404).json({
+      ok: false,
+      error: "Signal not found"
     });
   }
-}
 
-/* =========================
-   HEALTH
-========================= */
+  item.read = true;
 
-app.get(
-  '/api/health',
-  (req, res) => {
+  res.json({
+    ok: true,
+    item
+  });
+});
 
-    res.json({
+app.post("/api/history/read-all", (req, res) => {
+  signalHistory.forEach(x => {
+    x.read = true;
+  });
 
-      ok: true,
+  res.json({
+    ok: true
+  });
+});
 
-      service:
-        'BTC/USD AI SCALPING ENGINE V5',
+// ------------------------------------------------------------
+// ALERTS
+// ------------------------------------------------------------
 
-      time:
-        new Date().toISOString(),
+app.get("/api/alerts", (req, res) => {
+  const unread = signalHistory.filter(
+    x => !x.read
+  );
 
-      websocket: {
-        connected:
-          wss.clients.size > 0,
+  res.json({
+    ok: true,
+    count: unread.length,
+    alerts: unread
+  });
+});
 
-        clients:
-          wss.clients.size
-      },
+// ------------------------------------------------------------
+// WEBSOCKET
+// ------------------------------------------------------------
 
-      provider:
-        'Binance public',
+function broadcast(message) {
+  const payload = JSON.stringify(message);
 
-      lastError:
-        null,
-
-      uptime:
-        process.uptime(),
-
-      node:
-        process.version
-    });
-  }
-);
-
-/* =========================
-   PRICE
-========================= */
-
-app.get(
-  '/api/price',
-  async (req, res) => {
-
-    try {
-
-      const x =
-        await getSpot24h();
-
-      res.json({
-
-        symbol: SYMBOL,
-
-        lastPrice:
-          num(x.lastPrice),
-
-        markPrice:
-          num(x.lastPrice),
-
-        indexPrice:
-          null,
-
-        fundingRate:
-          null,
-
-        nextFundingTime:
-          null,
-
-        volume24h:
-          num(x.volume),
-
-        turnover24h:
-          num(x.quoteVolume),
-
-        price24hPcnt:
-          num(x.priceChangePercent),
-
-        source:
-          'Binance'
-      });
-
-    } catch (e) {
-
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
       try {
-
-        const x =
-          await getFutures24h();
-
-        res.json({
-
-          symbol: SYMBOL,
-
-          lastPrice:
-            num(x.lastPrice),
-
-          markPrice:
-            num(x.lastPrice),
-
-          indexPrice:
-            null,
-
-          fundingRate:
-            null,
-
-          nextFundingTime:
-            null,
-
-          volume24h:
-            num(x.volume),
-
-          turnover24h:
-            num(x.quoteVolume),
-
-          price24hPcnt:
-            num(x.priceChangePercent),
-
-          source:
-            'Binance Futures'
-        });
-
-      } catch (e2) {
-
-        res.status(502).json({
-          error:
-            e2.message
-        });
-      }
+        client.send(payload);
+      } catch {}
     }
-  }
-);
-
-/* =========================
-   CANDLES
-========================= */
-
-app.get(
-  '/api/candles',
-  async (req, res) => {
-
-    const allowed = [
-      '1m',
-      '3m',
-      '5m',
-      '15m',
-      '30m',
-      '1h',
-      '4h'
-    ];
-
-    const interval =
-      allowed.includes(
-        req.query.interval
-      )
-        ? req.query.interval
-        : '5m';
-
-    try {
-
-      const rows =
-        await getSpotKlines(
-          interval,
-          req.query.limit || 120
-        );
-
-      res.json({
-
-        symbol: SYMBOL,
-
-        interval,
-
-        source:
-          'Binance',
-
-        candles:
-          candlesFromBinance(rows)
-      });
-
-    } catch (e) {
-
-      res.status(502).json({
-        error:
-          e.message
-      });
-    }
-  }
-);
-
-/* =========================
-   OPEN INTEREST
-========================= */
-
-app.get(
-  '/api/oi',
-  async (req, res) => {
-
-    try {
-
-      res.json({
-
-        symbol: SYMBOL,
-
-        source:
-          'Binance Futures',
-
-        data:
-          await getOpenInterest()
-      });
-
-    } catch (e) {
-
-      res.status(502).json({
-        error:
-          e.message
-      });
-    }
-  }
-);
-
-/* =========================
-   FUNDING
-========================= */
-
-app.get(
-  '/api/funding',
-  async (req, res) => {
-
-    try {
-
-      res.json({
-
-        symbol: SYMBOL,
-
-        source:
-          'Binance Futures',
-
-        data:
-          await getFunding()
-      });
-
-    } catch (e) {
-
-      res.status(502).json({
-        error:
-          e.message
-      });
-    }
-  }
-);
-
-/* =========================
-   DASHBOARD
-========================= */
-
-app.get(
-  '/api/dashboard',
-  async (req, res) => {
-
-    try {
-
-      const d =
-        await buildDashboard();
-
-      lastDashboard =
-        d;
-
-      pushHistory(d);
-
-      res.json(d);
-
-    } catch (e) {
-
-      res.status(502).json({
-
-        ok: false,
-
-        error:
-          e.message,
-
-        timestamp:
-          new Date().toISOString()
-      });
-    }
-  }
-);
-
-/* =========================
-   SIGNAL HISTORY
-========================= */
-
-app.get(
-  '/api/signal/history',
-  (req, res) => {
-
-    res.json({
-      ok: true,
-      items: history
-    });
-  }
-);
-
-/* =========================
-   ALERTS
-========================= */
-
-app.get(
-  '/api/alerts',
-  (req, res) => {
-
-    res.json({
-      ok: true,
-      items: alerts
-    });
-  }
-);
-
-/* =========================
-   READ SIGNAL
-========================= */
-
-app.post(
-  '/api/signal/history/:id/read',
-  (req, res) => {
-
-    const item =
-      history.find(
-        x =>
-          x.id ===
-          req.params.id
-      );
-
-    if (!item) {
-
-      return res
-        .status(404)
-        .json({
-          ok: false,
-          error:
-            'Signal not found'
-        });
-    }
-
-    item.read = true;
-
-    res.json({
-      ok: true,
-      item
-    });
-  }
-);
-
-/* =========================
-   MARKET
-========================= */
-
-app.get(
-  '/api/market',
-  async (req, res) => {
-
-    try {
-
-      const [
-        price,
-        rows
-      ] =
-        await Promise.all([
-          getSpot24h(),
-          getSpotKlines(
-            '5m',
-            120
-          )
-        ]);
-
-      res.json({
-
-        ok: true,
-
-        source:
-          'Binance',
-
-        price,
-
-        analysis:
-          timeframeAnalysis(
-            candlesFromBinance(
-              rows
-            )
-          )
-      });
-
-    } catch (e) {
-
-      res.status(502).json({
-
-        ok: false,
-
-        error:
-          e.message
-      });
-    }
-  }
-);
-
-/* =========================
-   WEBSOCKET
-========================= */
-
-wss.on(
-  'connection',
-  ws => {
-
+  });
+}
+
+wss.on("connection", async ws => {
+  try {
     ws.send(
       JSON.stringify({
-
-        type: 'hello',
-
-        service:
-          'BTC/USD AI SCALPING ENGINE V5',
-
-        timestamp:
-          new Date().toISOString()
+        type: "connected",
+        time: nowISO(),
+        provider: "OKX public"
       })
     );
 
-    if (lastDashboard) {
-
+    if (cache.dashboard?.data) {
       ws.send(
         JSON.stringify({
-          type: 'dashboard',
-          data:
-            lastDashboard
+          type: "dashboard",
+          data: cache.dashboard.data
         })
       );
     }
+  } catch {}
+});
+
+// ------------------------------------------------------------
+// PERIODIC LIVE UPDATE
+// ------------------------------------------------------------
+
+let updateRunning = false;
+
+async function periodicUpdate() {
+  if (updateRunning) return;
+
+  updateRunning = true;
+
+  try {
+    const dashboard = await buildDashboard();
+
+    recordSignal(dashboard);
+
+    broadcast({
+      type: "dashboard",
+      data: dashboard
+    });
+
+  } catch (error) {
+    broadcast({
+      type: "error",
+      error: error.message,
+      time: nowISO()
+    });
+  } finally {
+    updateRunning = false;
   }
-);
+}
 
-/*
-  IMPORTANT:
-  Express 5 compatible SPA fallback.
-  Do NOT use app.get('*').
-*/
+// Every 10 seconds
+setInterval(periodicUpdate, 10000);
 
-app.use(
-  (req, res, next) => {
+// ------------------------------------------------------------
+// FRONTEND FALLBACK
+// ------------------------------------------------------------
 
-    if (req.method !== 'GET') {
-      return next();
-    }
-
-    res.sendFile(
-      path.join(
-        __dirname,
-        'frontend',
-        'index.html'
-      )
-    );
+app.get("*", (req, res) => {
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({
+      ok: false,
+      error: "API route not found"
+    });
   }
-);
 
-/* =========================
-   START SERVER
-========================= */
+  res.sendFile(
+    path.join(FRONTEND_DIR, "index.html")
+  );
+});
 
-server.listen(
-  PORT,
-  HOST,
-  () => {
+// ------------------------------------------------------------
+// ERROR HANDLER
+// ------------------------------------------------------------
 
-    console.log(
-      `BTC AI SCALPING ENGINE V5 listening on ${HOST}:${PORT}`
-    );
+app.use((err, req, res, next) => {
+  console.error("SERVER ERROR:", err);
 
-    refresh();
+  res.status(500).json({
+    ok: false,
+    error: "Internal server error"
+  });
+});
 
-    setInterval(
-      refresh,
-      15000
-    );
-  }
-);
+// ------------------------------------------------------------
+// START
+// ------------------------------------------------------------
+
+server.listen(PORT, HOST, () => {
+  console.log("==============================================");
+  console.log(" BTC/USD AI SCALPING ENGINE V4");
+  console.log("==============================================");
+  console.log(`Server: http://${HOST}:${PORT}`);
+  console.log(`Provider: OKX Public API`);
+  console.log(`BTC Spot: ${SPOT_INST}`);
+  console.log(`BTC Swap: ${SWAP_INST}`);
+  console.log(`Node: ${process.version}`);
+  console.log("==============================================");
+});
