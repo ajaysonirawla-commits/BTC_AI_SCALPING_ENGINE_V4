@@ -3,1696 +3,956 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const http = require('http');
 const WebSocket = require('ws');
 
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server, path: '/ws' });
 
 app.use(cors());
-app.use(express.json());
-
-app.use(
-  express.static(
-    path.join(__dirname, 'frontend')
-  )
-);
+app.use(express.json({ limit: '1mb' }));
+app.use(express.static(path.join(__dirname, 'frontend')));
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
+const SYMBOL = process.env.SYMBOL || 'BTCUSDT';
 
-const SYMBOL = 'BTCUSDT';
+const SPOT_BASES = [
+  'https://api.binance.com',
+  'https://api1.binance.com',
+  'https://api2.binance.com',
+  'https://api3.binance.com',
+  'https://api4.binance.com'
+];
 
-const PROVIDERS = {
-  bybit: 'https://api.bybit.com',
-  binance: 'https://api.binance.com',
-  binanceVision: 'https://data-api.binance.vision'
-};
+const FUTURES_BASES = [
+  'https://fapi.binance.com',
+  'https://fapi1.binance.com',
+  'https://fapi2.binance.com',
+  'https://fapi3.binance.com',
+  'https://fapi4.binance.com'
+];
 
-const state = {
-  startedAt: Date.now(),
+const history = [];
+const alerts = [];
 
-  stream: {
-    connected: false,
-    lastMessage: null,
-    reconnects: 0,
-    provider: 'Bybit'
-  },
+let lastDashboard = null;
+let lastGoodPrice = null;
 
-  last: null,
-  lastSignalKey: '',
-  history: new Map()
-};
+function num(v, fallback = null) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 
+function clamp(v, min, max) {
+  return Math.min(max, Math.max(min, v));
+}
 
-/* =========================================================
-   BASIC HELPERS
-========================================================= */
+function avg(arr) {
+  const a = arr.filter(Number.isFinite);
+  return a.length
+    ? a.reduce((x, y) => x + y, 0) / a.length
+    : null;
+}
 
-async function fetchJson(url, timeout = 12000) {
+function fmt(v, d = 2) {
+  return Number.isFinite(v) ? Number(v.toFixed(d)) : null;
+}
 
+async function fetchJson(url, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
-
-  const timer = setTimeout(
-    () => controller.abort(),
-    timeout
-  );
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-
-    const response = await fetch(
-      url,
-      {
-        method: 'GET',
-
-        headers: {
-          accept: 'application/json',
-          'user-agent':
-            'BTC-AI-Scalping-Engine/4.0'
-        },
-
-        signal: controller.signal
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'BTC-AI-SCALPING-ENGINE-V5/1.0',
+        'Accept': 'application/json,text/plain,*/*',
+        ...(options.headers || {})
       }
-    );
+    });
 
-    const text = await response.text();
+    const text = await res.text();
 
-    let data;
+    if (!res.ok) {
+      throw new Error(
+        `HTTP ${res.status} from ${new URL(url).hostname}`
+      );
+    }
 
     try {
-
-      data = JSON.parse(text);
-
-    } catch (e) {
-
+      return JSON.parse(text);
+    } catch {
       throw new Error(
         `Non-JSON response from ${new URL(url).hostname}`
       );
-
     }
-
-    if (!response.ok) {
-
-      throw new Error(
-        `HTTP ${response.status}`
-      );
-
-    }
-
-    return data;
-
   } finally {
-
     clearTimeout(timer);
-
   }
 }
 
+async function tryBases(bases, endpoint) {
+  let lastError = null;
 
-function n(value, fallback = null) {
+  for (const base of bases) {
+    try {
+      return await fetchJson(`${base}${endpoint}`);
+    } catch (e) {
+      lastError = e;
+    }
+  }
 
-  const x = Number(value);
-
-  return Number.isFinite(x)
-    ? x
-    : fallback;
+  throw lastError || new Error('All market data sources failed');
 }
 
+async function getSpot24h() {
+  return tryBases(
+    SPOT_BASES,
+    `/api/v3/ticker/24hr?symbol=${encodeURIComponent(SYMBOL)}`
+  );
+}
 
-function clamp(value, min = 0, max = 100) {
+async function getFutures24h() {
+  return tryBases(
+    FUTURES_BASES,
+    `/fapi/v1/ticker/24hr?symbol=${encodeURIComponent(SYMBOL)}`
+  );
+}
 
-  return Math.max(
-    min,
-    Math.min(max, value)
+async function getSpotKlines(interval = '5m', limit = 120) {
+  limit = clamp(
+    Math.floor(num(limit, 120)),
+    20,
+    500
   );
 
+  return tryBases(
+    SPOT_BASES,
+    `/api/v3/klines?symbol=${SYMBOL}&interval=${encodeURIComponent(interval)}&limit=${limit}`
+  );
 }
 
-
-function avg(values) {
-
-  return values.length
-    ? values.reduce(
-        (a, b) => a + b,
-        0
-      ) / values.length
-    : null;
-
+async function getOpenInterest() {
+  return tryBases(
+    FUTURES_BASES,
+    `/fapi/v1/openInterest?symbol=${SYMBOL}`
+  );
 }
 
+async function getFunding() {
+  return tryBases(
+    FUTURES_BASES,
+    `/fapi/v1/fundingRate?symbol=${SYMBOL}&limit=1`
+  );
+}
 
-function pct(current, previous) {
-
-  if (
-    current == null ||
-    previous == null ||
-    previous === 0
-  ) {
+async function getGlobalLongShort() {
+  try {
+    return await tryBases(
+      FUTURES_BASES,
+      `/futures/data/globalLongShortAccountRatio?symbol=${SYMBOL}&period=5m&limit=1`
+    );
+  } catch {
     return null;
   }
-
-  return (
-    (current - previous) /
-    previous
-  ) * 100;
-
 }
 
-
-function nowISO() {
-
-  return new Date().toISOString();
-
+function candlesFromBinance(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map(k => ({
+      time: Number(k[0]),
+      open: Number(k[1]),
+      high: Number(k[2]),
+      low: Number(k[3]),
+      close: Number(k[4]),
+      volume: Number(k[5])
+    }))
+    .filter(x =>
+      [
+        x.open,
+        x.high,
+        x.low,
+        x.close,
+        x.volume
+      ].every(Number.isFinite)
+    );
 }
-
-
-/* =========================================================
-   TECHNICAL INDICATORS
-========================================================= */
 
 function ema(values, period) {
+  if (values.length < period) return null;
 
-  if (!values.length) {
-    return null;
+  let e = avg(values.slice(0, period));
+  const k = 2 / (period + 1);
+
+  for (let i = period; i < values.length; i++) {
+    e = values[i] * k + e * (1 - k);
   }
 
-  const multiplier =
-    2 / (period + 1);
-
-  let result = values[0];
-
-  for (
-    let i = 1;
-    i < values.length;
-    i++
-  ) {
-
-    result =
-      values[i] * multiplier +
-      result * (1 - multiplier);
-
-  }
-
-  return result;
-
+  return e;
 }
-
 
 function rsi(values, period = 14) {
+  if (values.length < period + 1) return null;
 
-  if (
-    values.length <= period
-  ) {
-    return null;
-  }
+  let gains = 0;
+  let losses = 0;
 
-  let gain = 0;
-  let loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = values[i] - values[i - 1];
 
-  for (
-    let i = 1;
-    i <= period;
-    i++
-  ) {
-
-    const difference =
-      values[i] -
-      values[i - 1];
-
-    if (difference >= 0) {
-
-      gain += difference;
-
+    if (d >= 0) {
+      gains += d;
     } else {
-
-      loss -= difference;
-
+      losses -= d;
     }
-
   }
 
-  let averageGain =
-    gain / period;
+  let ag = gains / period;
+  let al = losses / period;
 
-  let averageLoss =
-    loss / period;
+  for (let i = period + 1; i < values.length; i++) {
+    const d = values[i] - values[i - 1];
 
-  for (
-    let i = period + 1;
-    i < values.length;
-    i++
-  ) {
+    ag =
+      ((ag * (period - 1)) + Math.max(d, 0))
+      / period;
 
-    const difference =
-      values[i] -
-      values[i - 1];
-
-    averageGain =
-      (
-        averageGain *
-          (period - 1) +
-        (difference > 0
-          ? difference
-          : 0)
-      ) / period;
-
-    averageLoss =
-      (
-        averageLoss *
-          (period - 1) +
-        (difference < 0
-          ? -difference
-          : 0)
-      ) / period;
-
+    al =
+      ((al * (period - 1)) + Math.max(-d, 0))
+      / period;
   }
 
-  if (averageLoss === 0) {
+  if (al === 0) return 100;
 
-    return 100;
-
-  }
-
-  const rs =
-    averageGain /
-    averageLoss;
-
-  return 100 -
-    (100 / (1 + rs));
-
+  return 100 - (100 / (1 + ag / al));
 }
 
+function atr(candles, period = 14) {
+  if (candles.length < period + 1) return null;
 
-function atr(rows, period = 14) {
+  const trs = [];
 
-  if (
-    rows.length <= period
-  ) {
-    return null;
-  }
+  for (let i = 1; i < candles.length; i++) {
+    const c = candles[i];
+    const p = candles[i - 1];
 
-  const trueRanges = [];
-
-  for (
-    let i = 1;
-    i < rows.length;
-    i++
-  ) {
-
-    const high =
-      rows[i].high;
-
-    const low =
-      rows[i].low;
-
-    const previousClose =
-      rows[i - 1].close;
-
-    trueRanges.push(
+    trs.push(
       Math.max(
-        high - low,
-
-        Math.abs(
-          high - previousClose
-        ),
-
-        Math.abs(
-          low - previousClose
-        )
+        c.high - c.low,
+        Math.abs(c.high - p.close),
+        Math.abs(c.low - p.close)
       )
     );
-
   }
 
-  return avg(
-    trueRanges.slice(-period)
+  return avg(trs.slice(-period));
+}
+
+function sessionVwap(candles) {
+  let pv = 0;
+  let vol = 0;
+
+  for (const c of candles) {
+    const typical =
+      (c.high + c.low + c.close) / 3;
+
+    pv += typical * c.volume;
+    vol += c.volume;
+  }
+
+  return vol ? pv / vol : null;
+}
+
+function volumeRatio(candles, period = 20) {
+  if (candles.length < period + 1) return null;
+
+  const current =
+    candles[candles.length - 1].volume;
+
+  const base = avg(
+    candles
+      .slice(-period - 1, -1)
+      .map(c => c.volume)
   );
 
+  return base ? current / base : null;
 }
 
+function timeframeAnalysis(candles) {
+  const closes = candles.map(c => c.close);
 
-function sessionVWAP(rows) {
+  const price = closes.at(-1);
 
-  let priceVolume = 0;
-  let volume = 0;
+  const e20 = ema(closes, 20);
+  const e50 = ema(closes, 50);
 
-  for (const row of rows) {
+  const r = rsi(closes, 14);
+  const vwap = sessionVwap(candles);
 
-    const typicalPrice =
-      (
-        row.high +
-        row.low +
-        row.close
-      ) / 3;
+  const a = atr(candles, 14);
+  const vr = volumeRatio(candles, 20);
 
-    priceVolume +=
-      typicalPrice *
-      row.volume;
+  let score = 50;
 
-    volume += row.volume;
-
+  if (e20 != null) {
+    score += price > e20 ? 12 : -12;
   }
 
-  return volume
-    ? priceVolume / volume
-    : null;
-
-}
-
-
-/* =========================================================
-   BYBIT KLINE
-========================================================= */
-
-function parseBybitKlines(list) {
-
-  return (
-    Array.isArray(list)
-      ? list
-      : []
-  )
-    .slice()
-    .reverse()
-    .map(row => ({
-
-      time: n(row[0]),
-
-      open: n(row[1]),
-
-      high: n(row[2]),
-
-      low: n(row[3]),
-
-      close: n(row[4]),
-
-      volume: n(row[5])
-
-    }))
-    .filter(row =>
-      [
-        row.open,
-        row.high,
-        row.low,
-        row.close,
-        row.volume
-      ].every(
-        value => value != null
-      )
-    );
-
-}
-
-
-/* =========================================================
-   BYBIT TICKER
-========================================================= */
-
-async function bybitTicker() {
-
-  const url =
-    `${PROVIDERS.bybit}` +
-    `/v5/market/tickers` +
-    `?category=linear` +
-    `&symbol=${SYMBOL}`;
-
-  const data =
-    await fetchJson(url);
-
-  const item =
-    data?.result?.list?.[0];
-
-  if (!item) {
-
-    throw new Error(
-      'Bybit ticker unavailable'
-    );
-
+  if (e50 != null) {
+    score += price > e50 ? 13 : -13;
   }
+
+  if (r != null) {
+    if (r > 55 && r < 75) score += 5;
+    if (r < 45 && r > 25) score -= 5;
+    if (r > 80) score -= 5;
+    if (r < 20) score += 5;
+  }
+
+  score = clamp(score, 0, 100);
 
   return {
+    price: fmt(price),
+    rsi: fmt(r),
+    ema20: fmt(e20),
+    ema50: fmt(e50),
+    vwap: fmt(vwap),
+    atr: fmt(a),
+    volumeRatio: fmt(vr, 3),
 
-    price:
-      n(item.lastPrice),
+    trend:
+      score >= 60
+        ? 'BULLISH'
+        : score <= 40
+          ? 'BEARISH'
+          : 'MIXED',
 
-    change:
-      n(item.price24hPcnt) * 100,
+    vwapBias:
+      vwap == null
+        ? 'UNKNOWN'
+        : price > vwap
+          ? 'ABOVE VWAP'
+          : 'BELOW VWAP',
 
-    volume24h:
-      n(item.volume24h),
-
-    turnover24h:
-      n(item.turnover24h),
-
-    fundingRate:
-      n(item.fundingRate),
-
-    nextFundingTime:
-      n(item.nextFundingTime),
-
-    markPrice:
-      n(item.markPrice),
-
-    indexPrice:
-      n(item.indexPrice)
-
+    score: Math.round(score)
   };
-
 }
 
+function buildSignal(tf, derivatives = {}) {
+  const f = tf['5m'] || {};
+  const h1 = tf['1h'] || {};
+  const m15 = tf['15m'] || {};
 
-/* =========================================================
-   BYBIT KLINES
-========================================================= */
+  const price = f.price;
 
-async function bybitKlines(
-  interval = '5',
-  limit = 200
-) {
-
-  const url =
-    `${PROVIDERS.bybit}` +
-    `/v5/market/kline` +
-    `?category=linear` +
-    `&symbol=${SYMBOL}` +
-    `&interval=${interval}` +
-    `&limit=${limit}`;
-
-  const data =
-    await fetchJson(url);
-
-  return parseBybitKlines(
-    data?.result?.list
-  );
-
-}
-
-
-/* =========================================================
-   BYBIT OPEN INTEREST
-========================================================= */
-
-async function bybitOI(
-  interval = '5min'
-) {
-
-  const url =
-    `${PROVIDERS.bybit}` +
-    `/v5/market/open-interest` +
-    `?category=linear` +
-    `&symbol=${SYMBOL}` +
-    `&intervalTime=${interval}` +
-    `&limit=50`;
-
-  const data =
-    await fetchJson(url);
-
-  return (
-    data?.result?.list || []
-  )
-    .slice()
-    .reverse()
-    .map(item => ({
-
-      time:
-        n(item.timestamp),
-
-      oi:
-        n(
-          item.singleOpenInterest ??
-          item.openInterest
-        )
-
-    }));
-
-}
-
-
-/* =========================================================
-   BYBIT LONG SHORT
-========================================================= */
-
-async function bybitLongShort() {
-
-  const url =
-    `${PROVIDERS.bybit}` +
-    `/v5/market/account-ratio` +
-    `?category=linear` +
-    `&symbol=${SYMBOL}` +
-    `&period=5min` +
-    `&limit=1`;
-
-  const data =
-    await fetchJson(url);
-
-  const item =
-    data?.result?.list?.[0];
-
-  if (!item) {
-
-    return null;
-
+  if (!Number.isFinite(price)) {
+    return {
+      score: 0,
+      buyScore: 0,
+      sellScore: 0,
+      action: 'WAIT',
+      label: 'WAIT',
+      confidence: 0,
+      entry: null,
+      stopLoss: null,
+      target1: null,
+      target2: null,
+      holdingWindow: 'WAIT',
+      reason: 'Live price unavailable',
+      coverage: 0,
+      components: {},
+      weights: {}
+    };
   }
 
-  const buyRatio =
-    n(item.buyRatio);
+  let buy = 0;
+  let sell = 0;
 
-  const sellRatio =
-    n(item.sellRatio);
-
-  return {
-
-    buyRatio,
-
-    sellRatio,
-
-    ratio:
-      buyRatio /
-      Math.max(
-        sellRatio || 1,
-        0.0000001
-      )
-
-  };
-
-}
-
-
-/* =========================================================
-   BINANCE FALLBACK
-   HTTP 451 होने पर Bybit primary रहेगा
-========================================================= */
-
-async function binanceSpotFallback() {
-
-  const urls = [
-
-    `${PROVIDERS.binance}` +
-    `/api/v3/ticker/24hr` +
-    `?symbol=${SYMBOL}`,
-
-    `${PROVIDERS.binanceVision}` +
-    `/api/v3/ticker/24hr` +
-    `?symbol=${SYMBOL}`
-
-  ];
-
-  for (const url of urls) {
-
-    try {
-
-      const item =
-        await fetchJson(
-          url,
-          7000
-        );
-
-      return {
-
-        price:
-          n(item.lastPrice),
-
-        change:
-          n(item.priceChangePercent),
-
-        volume24h:
-          n(item.volume),
-
-        turnover24h:
-          n(item.quoteVolume),
-
-        provider:
-          'Binance'
-
-      };
-
-    } catch (error) {
-
-      console.log(
-        'Binance fallback failed:',
-        error.message
-      );
-
-    }
-
-  }
-
-  return null;
-
-}
-
-
-/* =========================================================
-   TECHNICAL DATA
-========================================================= */
-
-async function getTechnicals() {
-
-  const [
-    rows5,
-    rows15
-  ] = await Promise.all([
-
-    bybitKlines(
-      '5',
-      200
-    ),
-
-    bybitKlines(
-      '15',
-      200
-    )
-
-  ]);
-
-  const closes5 =
-    rows5.map(
-      row => row.close
-    );
-
-  const vwap =
-    sessionVWAP(
-      rows5.slice(-96)
-    );
-
-  const ema20 =
-    ema(
-      closes5.slice(-100),
-      20
-    );
-
-  const ema50 =
-    ema(
-      closes5.slice(-150),
-      50
-    );
-
-  const rsiValue =
-    rsi(
-      closes5,
-      14
-    );
-
-  const atrValue =
-    atr(
-      rows5,
-      14
-    );
-
-  const recentVolume =
-    avg(
-      rows5
-        .slice(-5)
-        .map(
-          row => row.volume
-        )
-    );
-
-  const previousVolume =
-    avg(
-      rows5
-        .slice(-25, -5)
-        .map(
-          row => row.volume
-        )
-    );
-
-  let trend = 'MIXED';
-
-  if (
-    ema20 &&
-    ema50 &&
-    closes5.length
-  ) {
-
-    const price =
-      closes5.at(-1);
-
-    if (
-      ema20 > ema50 &&
-      price > ema20
-    ) {
-
-      trend = 'BULLISH';
-
-    } else if (
-      ema20 < ema50 &&
-      price < ema20
-    ) {
-
-      trend = 'BEARISH';
-
-    }
-
-  }
-
-  const closes15 =
-    rows15.map(
-      row => row.close
-    );
-
-  const ema20_15 =
-    ema(
-      closes15.slice(-100),
-      20
-    );
-
-  const ema50_15 =
-    ema(
-      closes15.slice(-150),
-      50
-    );
-
-  let trend15 = 'MIXED';
-
-  if (
-    ema20_15 &&
-    ema50_15 &&
-    closes15.length
-  ) {
-
-    const price15 =
-      closes15.at(-1);
-
-    if (
-      ema20_15 > ema50_15 &&
-      price15 > ema20_15
-    ) {
-
-      trend15 = 'BULLISH';
-
-    } else if (
-      ema20_15 < ema50_15 &&
-      price15 < ema20_15
-    ) {
-
-      trend15 = 'BEARISH';
-
-    }
-
-  }
-
-  return {
-
-    rows5,
-
-    rows15,
-
-    technical: {
-
-      rsi:
-        rsiValue,
-
-      vwap,
-
-      ema20,
-
-      ema50,
-
-      atr:
-        atrValue,
-
-      trend,
-
-      volumeRatio:
-        previousVolume
-          ? recentVolume /
-            previousVolume
-          : null
-
-    },
-
-    technical15: {
-
-      trend:
-        trend15,
-
-      ema20:
-        ema20_15,
-
-      ema50:
-        ema50_15
-
-    }
-
-  };
-
-}
-
-
-/* =========================================================
-   SIGNAL FACTORS
-========================================================= */
-
-function calculateFactors({
-
-  price,
-
-  technical,
-
-  oiDelta,
-
-  funding,
-
-  longShort
-
-}) {
-
-  const priceScore =
-    technical.trend === 'BULLISH'
-      ? 75
-      : technical.trend === 'BEARISH'
-        ? 25
-        : 50;
-
-
-  let rsiScore = 50;
-
-  if (
-    technical.rsi != null
-  ) {
-
-    if (
-      technical.rsi < 30
-    ) {
-
-      rsiScore = 80;
-
-    } else if (
-      technical.rsi > 70
-    ) {
-
-      rsiScore = 20;
-
-    } else {
-
-      rsiScore =
-        50 +
-        (
-          50 -
-          technical.rsi
-        ) * 0.5;
-
-    }
-
-  }
-
-
-  let emaScore = 50;
-
-  if (
-    technical.vwap &&
-    price
-  ) {
-
-    emaScore +=
-      price >
-      technical.vwap
-        ? 20
-        : -20;
-
-  }
-
-  if (
-    technical.ema20 &&
-    technical.ema50
-  ) {
-
-    emaScore +=
-      technical.ema20 >
-      technical.ema50
-        ? 15
-        : -15;
-
-  }
-
-  emaScore =
-    clamp(emaScore);
-
-
-  const volumeScore =
-    technical.volumeRatio == null
-      ? 50
-      : clamp(
-          50 +
-          (
-            technical.volumeRatio -
-            1
-          ) * 35
-        );
-
-
-  const oiScore =
-    oiDelta == null
-      ? 50
-      : clamp(
-          50 +
-          oiDelta * 5
-        );
-
-
-  const fundingScore =
-    funding == null
-      ? 50
-      : clamp(
-          50 -
-          funding * 10000
-        );
-
-
-  const liquidationScore =
-    50;
-
-
-  const largeTradeScore =
-    longShort?.ratio > 1.10
-      ? 60
-      : longShort?.ratio < 0.90
-        ? 40
-        : 50;
-
-
-  return {
-
-    price:
-      priceScore,
-
-    rsi:
-      rsiScore,
-
-    ema:
-      emaScore,
-
-    volume:
-      volumeScore,
-
-    oi:
-      oiScore,
-
-    funding:
-      fundingScore,
-
-    liq:
-      liquidationScore,
-
-    large:
-      largeTradeScore,
-
-    etf:
-      50,
-
-    macro:
-      50,
-
-    fg:
-      50
-
-  };
-
-}
-
-
-/* =========================================================
-   SIGNAL ENGINE 0–100
-========================================================= */
-
-function makeSignal(
-  price,
-  technical,
-  factors,
-  atrValue
-) {
+  const components = {};
 
   const weights = {
-
-    price: 15,
-
+    priceStructure: 15,
     rsi: 10,
-
-    ema: 10,
-
+    emaVwap: 10,
     volume: 10,
-
-    oi: 15,
-
+    openInterest: 15,
     funding: 5,
-
-    liq: 10,
-
-    large: 10,
-
-    etf: 5,
-
-    macro: 5,
-
-    fg: 5
-
+    liquidation: 10,
+    largeTrades: 10,
+    fearGreed: 5
   };
 
+  const ps = clamp(
+    (
+      (h1.score || 50) * 0.45 +
+      (m15.score || 50) * 0.30 +
+      (f.score || 50) * 0.25
+    ),
+    0,
+    100
+  );
 
-  let weightedScore = 0;
+  buy += ps * 0.15;
+  sell += (100 - ps) * 0.15;
 
-  let totalWeight = 0;
+  components.priceStructure =
+    Math.round(ps);
 
+  const r = f.rsi;
 
-  for (
-    const [
-      key,
-      weight
-    ] of Object.entries(weights)
-  ) {
+  const rScore =
+    r == null
+      ? 50
+      : r <= 35
+        ? 75
+        : r >= 65
+          ? 25
+          : 50 + (50 - r);
 
-    const value =
-      n(factors[key]);
+  buy += rScore * 0.10;
+  sell += (100 - rScore) * 0.10;
 
-    if (
-      value != null
-    ) {
+  components.rsi =
+    Math.round(rScore);
 
-      weightedScore +=
-        value * weight;
-
-      totalWeight +=
-        weight;
-
-    }
-
-  }
-
-
-  const finalScore =
-    totalWeight
-      ? weightedScore /
-        totalWeight
+  const ev =
+    f.ema20 != null &&
+    f.ema50 != null
+      ? (
+          f.price > f.ema20 &&
+          f.ema20 > f.ema50
+            ? 85
+            : f.price < f.ema20 &&
+              f.ema20 < f.ema50
+              ? 15
+              : 50
+        )
       : 50;
 
+  const vw =
+    f.vwapBias === 'ABOVE VWAP'
+      ? 70
+      : f.vwapBias === 'BELOW VWAP'
+        ? 30
+        : 50;
 
-  let direction =
-    'WAIT';
+  const emaVwap =
+    (ev + vw) / 2;
 
+  buy += emaVwap * 0.10;
+  sell += (100 - emaVwap) * 0.10;
 
-  if (
-    finalScore >= 60
-  ) {
+  components.emaVwap =
+    Math.round(emaVwap);
 
-    direction =
-      'LONG';
+  const vr = f.volumeRatio;
 
-  } else if (
-    finalScore <= 40
-  ) {
+  const volScore =
+    vr == null
+      ? 50
+      : clamp(
+          50 + (vr - 1) * 35,
+          20,
+          90
+        );
 
-    direction =
-      'SHORT';
+  buy += volScore * 0.10;
+  sell += (100 - volScore) * 0.10;
 
-  }
+  components.volume =
+    Math.round(volScore);
 
+  const oiScore =
+    derivatives.oi != null
+      ? 60
+      : 50;
 
-  const atrValueSafe =
-    atrValue ||
-    price * 0.003;
+  const fundScore =
+    derivatives.funding != null
+      ? clamp(
+          Math.round(
+            50 -
+            derivatives.funding * 100000
+          ),
+          10,
+          90
+        )
+      : 50;
 
+  const lsScore =
+    derivatives.longShort != null
+      ? clamp(
+          Math.round(
+            50 +
+            (derivatives.longShort - 1) * 80
+          ),
+          10,
+          90
+        )
+      : 50;
 
-  const entry =
-    price;
+  components.openInterest = oiScore;
+  components.funding = fundScore;
+  components.liquidation = 50;
+  components.largeTrades = lsScore;
+  components.fearGreed = 50;
 
+  buy += oiScore * 0.15;
+  buy += fundScore * 0.05;
+  buy += 50 * 0.10;
+  buy += lsScore * 0.10;
+  buy += 50 * 0.05;
 
-  let sl = null;
+  sell += (100 - oiScore) * 0.15;
+  sell += (100 - fundScore) * 0.05;
+  sell += 50 * 0.10;
+  sell += (100 - lsScore) * 0.10;
+  sell += 50 * 0.05;
+
+  const buyScore =
+    Math.round(clamp(buy, 0, 100));
+
+  const sellScore =
+    Math.round(clamp(sell, 0, 100));
+
+  const score =
+    Math.max(buyScore, sellScore);
+
+  const action =
+    score >= 68
+      ? (
+          buyScore > sellScore
+            ? 'LONG'
+            : 'SHORT'
+        )
+      : 'WAIT';
+
+  const atrVal =
+    f.atr || price * 0.002;
+
+  let stopLoss = null;
   let target1 = null;
   let target2 = null;
 
-
-  if (
-    direction === 'LONG'
-  ) {
-
-    sl =
-      price -
-      atrValueSafe * 1.2;
+  if (action === 'LONG') {
+    stopLoss =
+      price - atrVal * 1.2;
 
     target1 =
-      price +
-      atrValueSafe * 1.5;
+      price + atrVal * 1.5;
 
     target2 =
-      price +
-      atrValueSafe * 2.5;
-
+      price + atrVal * 2.5;
   }
 
-
-  if (
-    direction === 'SHORT'
-  ) {
-
-    sl =
-      price +
-      atrValueSafe * 1.2;
+  if (action === 'SHORT') {
+    stopLoss =
+      price + atrVal * 1.2;
 
     target1 =
-      price -
-      atrValueSafe * 1.5;
+      price - atrVal * 1.5;
 
     target2 =
-      price -
-      atrValueSafe * 2.5;
-
+      price - atrVal * 2.5;
   }
 
-
-  const confidence =
+  const coverage =
     Math.round(
-      Math.abs(
-        finalScore - 50
-      ) * 2
+      Object.values(components)
+        .filter(v => v !== 50)
+        .length
+      / 9 * 100
     );
 
+  return {
+    score,
+    buyScore,
+    sellScore,
 
-  const reasons = [];
+    action,
 
+    label:
+      action === 'LONG'
+        ? 'BUY'
+        : action === 'SHORT'
+          ? 'SELL'
+          : 'WAIT',
 
-  reasons.push(
-    `Price structure ${technical.trend}`
-  );
+    confidence: score,
 
+    coverage,
 
-  if (
-    technical.rsi != null
-  ) {
+    entry: fmt(price),
+    stopLoss: fmt(stopLoss),
+    target1: fmt(target1),
+    target2: fmt(target2),
 
-    reasons.push(
-      `RSI ${technical.rsi.toFixed(1)}`
+    holdingWindow:
+      action === 'WAIT'
+        ? 'Wait for confirmation'
+        : '5–30 min',
+
+    reason:
+      action === 'WAIT'
+        ? 'Trend/confirmation not strong enough'
+        : 'Multi-factor technical alignment',
+
+    components,
+    weights
+  };
+}
+
+async function buildDashboard() {
+  const intervals = [
+    '1m',
+    '5m',
+    '15m',
+    '1h'
+  ];
+
+  const pairs =
+    await Promise.all(
+      intervals.map(
+        async interval => {
+          try {
+            const rows =
+              await getSpotKlines(
+                interval,
+                120
+              );
+
+            return [
+              interval,
+              timeframeAnalysis(
+                candlesFromBinance(rows)
+              )
+            ];
+          } catch {
+            return [
+              interval,
+              {}
+            ];
+          }
+        }
+      )
     );
 
+  const tf =
+    Object.fromEntries(pairs);
+
+  const errors = {};
+
+  let priceData = null;
+
+  try {
+    priceData =
+      await getSpot24h();
+  } catch (e) {
+
+    try {
+      priceData =
+        await getFutures24h();
+    } catch (e2) {
+      errors.marketData =
+        e2.message;
+    }
   }
 
+  let oi = null;
+  let funding = null;
+  let ratio = null;
 
-  if (
-    technical.vwap
-  ) {
-
-    reasons.push(
-      price >
-      technical.vwap
-        ? 'Price above VWAP'
-        : 'Price below VWAP'
-    );
-
+  try {
+    oi =
+      await getOpenInterest();
+  } catch (e) {
+    errors.openInterest =
+      e.message;
   }
 
-
-  if (
-    technical.volumeRatio != null
-  ) {
-
-    reasons.push(
-      `Volume ${technical.volumeRatio.toFixed(2)}x`
-    );
-
+  try {
+    funding =
+      await getFunding();
+  } catch (e) {
+    errors.funding =
+      e.message;
   }
 
+  try {
+    ratio =
+      await getGlobalLongShort();
+  } catch {}
+
+  const price =
+    num(
+      priceData?.lastPrice,
+      tf['5m']?.price
+    );
+
+  if (price != null) {
+    lastGoodPrice = price;
+  }
+
+  const oiValue =
+    num(oi?.openInterest);
+
+  const fundingRate =
+    num(
+      Array.isArray(funding)
+        ? funding[0]?.fundingRate
+        : funding?.fundingRate
+    );
+
+  const longShort =
+    num(
+      Array.isArray(ratio)
+        ? ratio[0]?.longShortRatio
+        : ratio?.longShortRatio
+    );
+
+  const signal =
+    buildSignal(
+      tf,
+      {
+        oi: oiValue,
+        funding: fundingRate,
+        longShort
+      }
+    );
 
   return {
 
-    score:
-      Math.round(
-        clamp(finalScore)
-      ),
-
-    direction,
-
-    label:
-      direction === 'LONG'
-        ? '🟢 LONG — TRADE SETUP'
-        : direction === 'SHORT'
-          ? '🔴 SHORT — TRADE SETUP'
-          : '🟡 WAIT — CONFIRMATION NEEDED',
-
-    confidence,
-
-    coverage:
-      Math.round(totalWeight),
-
-    entry,
-
-    sl,
-
-    target1,
-
-    target2,
-
-    holding:
-      direction === 'WAIT'
-        ? 'Wait for confirmation'
-        : '5–30 min scalp window',
-
-    decision:
-      'Decision support only — guaranteed profit नहीं।',
-
-    reasons,
-
-    factors
-
-  };
-
-}
-
-
-/* =========================================================
-   COMPLETE DASHBOARD DATA
-========================================================= */
-
-async function getDashboardData() {
-
-  let ticker = null;
-
-  let provider =
-    'Bybit';
-
-
-  try {
-
-    ticker =
-      await bybitTicker();
-
-  } catch (error) {
-
-    console.log(
-      'Bybit ticker error:',
-      error.message
-    );
-
-    ticker =
-      await binanceSpotFallback();
-
-    provider =
-      ticker
-        ? 'Binance'
-        : 'Unavailable';
-
-  }
-
-
-  if (!ticker) {
-
-    throw new Error(
-      'BTC market data unavailable from Bybit and Binance fallback'
-    );
-
-  }
-
-
-  const {
-
-    rows5,
-
-    rows15,
-
-    technical,
-
-    technical15
-
-  } = await getTechnicals();
-
-
-  const oiData =
-    await bybitOI(
-      '5min'
-    ).catch(
-      () => []
-    );
-
-
-  const oiNow =
-    oiData.at(-1)?.oi ??
-    null;
-
-
-  const oiPrevious =
-    oiData.at(-2)?.oi ??
-    null;
-
-
-  const oiChange =
-    pct(
-      oiNow,
-      oiPrevious
-    );
-
-
-  const longShort =
-    await bybitLongShort()
-      .catch(
-        () => null
-      );
-
-
-  const factors =
-    calculateFactors({
-
-      price:
-        ticker.price,
-
-      technical,
-
-      oiDelta:
-        oiChange,
-
-      funding:
-        ticker.fundingRate,
-
-      longShort
-
-    });
-
-
-  const signal =
-    makeSignal(
-
-      ticker.price,
-
-      technical,
-
-      factors,
-
-      technical.atr
-
-    );
-
-
-  const recentVolume =
-    avg(
-      rows5
-        .slice(-5)
-        .map(
-          x => x.volume
-        )
-    );
-
-
-  const previousVolume =
-    avg(
-      rows5
-        .slice(-25, -5)
-        .map(
-          x => x.volume
-        )
-    );
-
-
-  const volumeChange =
-    pct(
-      recentVolume,
-      previousVolume
-    );
-
-
-  const oiRows = [
-
-    '1m',
-
-    '5m',
-
-    '10m',
-
-    '30m',
-
-    '1h'
-
-  ].map(tf => ({
-
-    tf,
-
-    oi:
-      oiNow,
-
-    change:
-      oiChange,
-
-    volume:
-      recentVolume,
-
-    volumeChange
-
-  }));
-
-
-  const data = {
-
     ok:
-      true,
+      Object.keys(errors).length === 0,
 
     timestamp:
-      nowISO(),
+      new Date().toISOString(),
 
     source:
-      'Bybit primary / Binance fallback',
+      'Binance public',
 
-    price:
-      ticker.price,
+    btc: {
+      symbol: SYMBOL,
 
-    change:
-      ticker.change,
+      price:
+        fmt(price),
 
-    volume24h:
-      ticker.volume24h,
+      change24h:
+        fmt(
+          num(
+            priceData?.priceChangePercent
+          ),
+          3
+        ),
 
-    turnover24h:
-      ticker.turnover24h,
+      volume24h:
+        fmt(
+          num(priceData?.volume),
+          4
+        ),
 
+      turnover24h:
+        fmt(
+          num(priceData?.quoteVolume),
+          2
+        )
+    },
 
-    technical,
+    timeframes: tf,
 
-    technical15,
+    openInterest: {
+      btc: oiValue,
+      usd: null,
+      change5m: null,
+      change30m: null,
+      change1h: null,
 
+      source:
+        oiValue != null
+          ? 'Binance Futures'
+          : 'unavailable'
+    },
+
+    funding: {
+      rate: fundingRate,
+
+      ratePct:
+        fundingRate != null
+          ? fmt(
+              fundingRate * 100,
+              5
+            )
+          : null,
+
+      nextFundingTime: null,
+
+      source:
+        fundingRate != null
+          ? 'Binance Futures'
+          : 'unavailable'
+    },
+
+    liquidation: {
+      total: null,
+      long1h: null,
+      short1h: null,
+      events: 0,
+      bias: 'UNAVAILABLE'
+    },
+
+    largeTrades: {
+      count: 0,
+      buyUsd: null,
+      sellUsd: null,
+      netUsd: null,
+      bias: 'UNAVAILABLE'
+    },
+
+    macro: {
+      fearGreed: null,
+      indices: {},
+      etf: {},
+      note:
+        'Optional macro feeds not connected'
+    },
+
+    fearGreed: {
+      value: null,
+      classification: 'Unavailable',
+      source:
+        'Alternative.me public'
+    },
+
+    sessions: {
+      india: 'ACTIVE CHECK',
+      usa: 'ACTIVE CHECK',
+      china: 'ACTIVE CHECK',
+
+      note:
+        'Session display only'
+    },
 
     signal,
 
+    components:
+      signal.components,
 
-    oi:
-      oiRows,
+    weights:
+      signal.weights,
 
-
-    openInterest: {
-
-      btc:
-        oiNow,
-
-      usd:
-        null,
-
-      change5m:
-        oiChange,
-
-      source:
-        'Bybit'
-
-    },
-
-
-    funding: {
-
-      rate:
-        ticker.fundingRate,
-
-      nextFundingTime:
-        ticker.nextFundingTime,
-
-      source:
-        'Bybit'
-
-    },
-
-
-    longShort,
-
-
-    liquidation: {
-
-      total1h:
-        null,
-
-      long1h:
-        null,
-
-      short1h:
-        null,
-
-      bias:
-        'UNAVAILABLE'
-
-    },
-
-
-    markets: {
-
-      BTCUSDT: {
-
-        last:
-          ticker.price,
-
-        change:
-          ticker.change
-
-      }
-
-    },
-
-
-    sessions: {
-
-      India:
-        'OPEN',
-
-      UK:
-        'OPEN',
-
-      USA:
-        'OPEN',
-
-      China:
-        'OPEN',
-
-      note:
-        'Crypto trades 24/7; index sessions are indicative only.'
-
-    },
-
-
-    sourceLinks: [
-
-      {
-
-        name:
-          'TradingView',
-
-        url:
-          'https://www.tradingview.com/chart/?symbol=BINANCE:BTCUSDT'
-
-      },
-
-      {
-
-        name:
-          'Bybit',
-
-        url:
-          'https://www.bybit.com'
-
-      },
-
-      {
-
-        name:
-          'Binance',
-
-        url:
-          'https://www.binance.com'
-
-      }
-
-    ],
-
-
-    news: [],
-
-
-    sources: [
-
-      {
-
-        name:
-          'Bybit market data',
-
-        status:
-          'LIVE'
-
-      },
-
-      {
-
-        name:
-          'Binance fallback',
-
-        status:
-          'READY'
-
-      },
-
-      {
-
-        name:
-          'Open Interest',
-
-        status:
-          oiNow != null
-            ? 'LIVE'
-            : 'UNAVAILABLE'
-
-      },
-
-      {
-
-        name:
-          'Funding',
-
-        status:
-          ticker.fundingRate != null
-            ? 'LIVE'
-            : 'UNAVAILABLE'
-
-      },
-
-      {
-
-        name:
-          'Liquidations',
-
-        status:
-          'UNAVAILABLE without dedicated feed'
-
-      },
-
-      {
-
-        name:
-          'ETF/Macro/Fear & Greed',
-
-        status:
-          'NOT CONNECTED'
-
-      }
-
-    ],
-
-
-    stream: {
-
-      connected:
-        true,
-
-      lastMessage:
-        state.stream.lastMessage,
-
-      reconnects:
-        state.stream.reconnects,
-
-      provider
-
-    }
-
+    errors
   };
-
-
-  state.last =
-    data;
-
-
-  return data;
-
 }
 
+function pushHistory(dashboard) {
+  if (!dashboard?.signal) return;
 
-/* =========================================================
+  const s =
+    dashboard.signal;
+
+  const item = {
+    id:
+      `${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 7)}`,
+
+    timestamp:
+      dashboard.timestamp,
+
+    action:
+      s.action,
+
+    score:
+      s.score,
+
+    buyScore:
+      s.buyScore,
+
+    sellScore:
+      s.sellScore,
+
+    entry:
+      s.entry,
+
+    stopLoss:
+      s.stopLoss,
+
+    target1:
+      s.target1,
+
+    target2:
+      s.target2,
+
+    read: false
+  };
+
+  const last =
+    history[0];
+
+  if (
+    !last ||
+    last.action !== item.action ||
+    Math.abs(
+      last.score - item.score
+    ) >= 5
+  ) {
+
+    history.unshift(item);
+
+    if (history.length > 100) {
+      history.pop();
+    }
+  }
+}
+
+function broadcast(payload) {
+  const text =
+    JSON.stringify(payload);
+
+  for (
+    const client of wss.clients
+  ) {
+
+    if (
+      client.readyState ===
+      WebSocket.OPEN
+    ) {
+      client.send(text);
+    }
+  }
+}
+
+async function refresh() {
+  try {
+
+    const d =
+      await buildDashboard();
+
+    lastDashboard = d;
+
+    pushHistory(d);
+
+    broadcast({
+      type: 'dashboard',
+      data: d
+    });
+
+  } catch (e) {
+
+    broadcast({
+      type: 'error',
+      error: e.message
+    });
+  }
+}
+
+/* =========================
    HEALTH
-========================================================= */
+========================= */
 
 app.get(
   '/api/health',
@@ -1700,30 +960,24 @@ app.get(
 
     res.json({
 
-      ok:
-        true,
+      ok: true,
 
       service:
-        'BTC/USD AI SCALPING ENGINE V4',
+        'BTC/USD AI SCALPING ENGINE V5',
 
       time:
-        nowISO(),
+        new Date().toISOString(),
 
-      WebSocket: {
-
+      websocket: {
         connected:
-          state.stream.connected,
+          wss.clients.size > 0,
 
-        lastMessage:
-          state.stream.lastMessage,
-
-        reconnects:
-          state.stream.reconnects
-
+        clients:
+          wss.clients.size
       },
 
       provider:
-        state.stream.provider,
+        'Binance public',
 
       lastError:
         null,
@@ -1733,16 +987,13 @@ app.get(
 
       node:
         process.version
-
     });
-
   }
 );
 
-
-/* =========================================================
-   PRICE API
-========================================================= */
+/* =========================
+   PRICE
+========================= */
 
 app.get(
   '/api/price',
@@ -1750,62 +1001,212 @@ app.get(
 
     try {
 
-      const data =
-        await getDashboardData();
-
+      const x =
+        await getSpot24h();
 
       res.json({
 
-        symbol:
-          SYMBOL,
+        symbol: SYMBOL,
 
         lastPrice:
-          data.price,
+          num(x.lastPrice),
 
         markPrice:
-          data.price,
+          num(x.lastPrice),
 
         indexPrice:
           null,
 
         fundingRate:
-          data.funding.rate,
+          null,
 
         nextFundingTime:
-          data.funding.nextFundingTime,
+          null,
 
         volume24h:
-          data.volume24h,
+          num(x.volume),
 
         turnover24h:
-          data.turnover24h,
+          num(x.quoteVolume),
 
         price24hPcnt:
-          data.change,
+          num(x.priceChangePercent),
 
         source:
-          data.stream.provider
-
+          'Binance'
       });
 
-    } catch (error) {
+    } catch (e) {
 
-      res.status(503).json({
+      try {
 
-        error:
-          error.message
+        const x =
+          await getFutures24h();
 
-      });
+        res.json({
 
+          symbol: SYMBOL,
+
+          lastPrice:
+            num(x.lastPrice),
+
+          markPrice:
+            num(x.lastPrice),
+
+          indexPrice:
+            null,
+
+          fundingRate:
+            null,
+
+          nextFundingTime:
+            null,
+
+          volume24h:
+            num(x.volume),
+
+          turnover24h:
+            num(x.quoteVolume),
+
+          price24hPcnt:
+            num(x.priceChangePercent),
+
+          source:
+            'Binance Futures'
+        });
+
+      } catch (e2) {
+
+        res.status(502).json({
+          error:
+            e2.message
+        });
+      }
     }
-
   }
 );
 
+/* =========================
+   CANDLES
+========================= */
 
-/* =========================================================
-   DASHBOARD API
-========================================================= */
+app.get(
+  '/api/candles',
+  async (req, res) => {
+
+    const allowed = [
+      '1m',
+      '3m',
+      '5m',
+      '15m',
+      '30m',
+      '1h',
+      '4h'
+    ];
+
+    const interval =
+      allowed.includes(
+        req.query.interval
+      )
+        ? req.query.interval
+        : '5m';
+
+    try {
+
+      const rows =
+        await getSpotKlines(
+          interval,
+          req.query.limit || 120
+        );
+
+      res.json({
+
+        symbol: SYMBOL,
+
+        interval,
+
+        source:
+          'Binance',
+
+        candles:
+          candlesFromBinance(rows)
+      });
+
+    } catch (e) {
+
+      res.status(502).json({
+        error:
+          e.message
+      });
+    }
+  }
+);
+
+/* =========================
+   OPEN INTEREST
+========================= */
+
+app.get(
+  '/api/oi',
+  async (req, res) => {
+
+    try {
+
+      res.json({
+
+        symbol: SYMBOL,
+
+        source:
+          'Binance Futures',
+
+        data:
+          await getOpenInterest()
+      });
+
+    } catch (e) {
+
+      res.status(502).json({
+        error:
+          e.message
+      });
+    }
+  }
+);
+
+/* =========================
+   FUNDING
+========================= */
+
+app.get(
+  '/api/funding',
+  async (req, res) => {
+
+    try {
+
+      res.json({
+
+        symbol: SYMBOL,
+
+        source:
+          'Binance Futures',
+
+        data:
+          await getFunding()
+      });
+
+    } catch (e) {
+
+      res.status(502).json({
+        error:
+          e.message
+      });
+    }
+  }
+);
+
+/* =========================
+   DASHBOARD
+========================= */
 
 app.get(
   '/api/dashboard',
@@ -1813,96 +1214,195 @@ app.get(
 
     try {
 
-      const data =
-        await getDashboardData();
+      const d =
+        await buildDashboard();
 
-      res.json(data);
+      lastDashboard =
+        d;
 
-    } catch (error) {
+      pushHistory(d);
 
-      console.error(
-        'Dashboard API error:',
-        error.message
-      );
+      res.json(d);
 
-      res.status(503).json({
+    } catch (e) {
 
-        ok:
-          false,
+      res.status(502).json({
+
+        ok: false,
 
         error:
-          error.message,
+          e.message,
 
         timestamp:
-          nowISO()
-
+          new Date().toISOString()
       });
-
     }
-
   }
 );
 
-
-/* =========================================================
+/* =========================
    SIGNAL HISTORY
-========================================================= */
+========================= */
 
 app.get(
-  '/api/history',
+  '/api/signal/history',
   (req, res) => {
 
     res.json({
-
-      ok:
-        true,
-
-      items:
-        [
-          ...state.history.values()
-        ]
-          .slice(-150)
-          .reverse()
-
+      ok: true,
+      items: history
     });
-
   }
 );
 
+/* =========================
+   ALERTS
+========================= */
 
-/* =========================================================
-   FRONTEND FALLBACK
-   IMPORTANT:
-   NO app.get('*')
-========================================================= */
+app.get(
+  '/api/alerts',
+  (req, res) => {
 
-app.use(
-  (req, res, next) => {
+    res.json({
+      ok: true,
+      items: alerts
+    });
+  }
+);
 
-    if (
-      req.path.startsWith('/api/')
-    ) {
+/* =========================
+   READ SIGNAL
+========================= */
+
+app.post(
+  '/api/signal/history/:id/read',
+  (req, res) => {
+
+    const item =
+      history.find(
+        x =>
+          x.id ===
+          req.params.id
+      );
+
+    if (!item) {
 
       return res
         .status(404)
         .json({
-
+          ok: false,
           error:
-            'API endpoint not found'
-
+            'Signal not found'
         });
-
     }
 
-    next();
+    item.read = true;
 
+    res.json({
+      ok: true,
+      item
+    });
   }
 );
 
+/* =========================
+   MARKET
+========================= */
 
 app.get(
-  '/',
-  (req, res) => {
+  '/api/market',
+  async (req, res) => {
+
+    try {
+
+      const [
+        price,
+        rows
+      ] =
+        await Promise.all([
+          getSpot24h(),
+          getSpotKlines(
+            '5m',
+            120
+          )
+        ]);
+
+      res.json({
+
+        ok: true,
+
+        source:
+          'Binance',
+
+        price,
+
+        analysis:
+          timeframeAnalysis(
+            candlesFromBinance(
+              rows
+            )
+          )
+      });
+
+    } catch (e) {
+
+      res.status(502).json({
+
+        ok: false,
+
+        error:
+          e.message
+      });
+    }
+  }
+);
+
+/* =========================
+   WEBSOCKET
+========================= */
+
+wss.on(
+  'connection',
+  ws => {
+
+    ws.send(
+      JSON.stringify({
+
+        type: 'hello',
+
+        service:
+          'BTC/USD AI SCALPING ENGINE V5',
+
+        timestamp:
+          new Date().toISOString()
+      })
+    );
+
+    if (lastDashboard) {
+
+      ws.send(
+        JSON.stringify({
+          type: 'dashboard',
+          data:
+            lastDashboard
+        })
+      );
+    }
+  }
+);
+
+/*
+  IMPORTANT:
+  Express 5 compatible SPA fallback.
+  Do NOT use app.get('*').
+*/
+
+app.use(
+  (req, res, next) => {
+
+    if (req.method !== 'GET') {
+      return next();
+    }
 
     res.sendFile(
       path.join(
@@ -1911,304 +1411,27 @@ app.get(
         'index.html'
       )
     );
-
   }
 );
 
-
-/* =========================================================
+/* =========================
    START SERVER
-========================================================= */
-
-const server =
-  app.listen(
-    PORT,
-    HOST,
-    () => {
-
-      console.log(
-        `BTC AI Scalping Engine listening on ${HOST}:${PORT}`
-      );
-
-    }
-  );
-
-
-/* =========================================================
-   BYBIT WEBSOCKET
-========================================================= */
-
-let ws = null;
-
-
-function connectWebSocket() {
-
-  try {
-
-    ws =
-      new WebSocket(
-        'wss://stream.bybit.com/v5/public/linear'
-      );
-
-
-    ws.on(
-      'open',
-      () => {
-
-        state.stream.connected =
-          true;
-
-        state.stream.provider =
-          'Bybit';
-
-
-        console.log(
-          'Bybit WebSocket connected'
-        );
-
-
-        ws.send(
-          JSON.stringify({
-
-            op:
-              'subscribe',
-
-            args: [
-
-              'tickers.BTCUSDT'
-
-            ]
-
-          })
-        );
-
-      }
-    );
-
-
-    ws.on(
-      'message',
-      message => {
-
-        state.stream.lastMessage =
-          Date.now();
-
-
-        try {
-
-          const data =
-            JSON.parse(
-              message.toString()
-            );
-
-
-          const price =
-            data?.data?.lastPrice;
-
-
-          if (price) {
-
-            state.lastPrice =
-              n(price);
-
-          }
-
-        } catch (error) {
-
-        }
-
-      }
-    );
-
-
-    ws.on(
-      'close',
-      () => {
-
-        state.stream.connected =
-          false;
-
-        state.stream.reconnects++;
-
-
-        console.log(
-          'Bybit WebSocket closed. Reconnecting...'
-        );
-
-
-        setTimeout(
-          connectWebSocket,
-          5000
-        );
-
-      }
-    );
-
-
-    ws.on(
-      'error',
-      error => {
-
-        state.stream.connected =
-          false;
-
-        console.log(
-          'WebSocket error:',
-          error.message
-        );
-
-      }
-    );
-
-
-  } catch (error) {
-
-    state.stream.connected =
-      false;
-
-    setTimeout(
-      connectWebSocket,
-      5000
-    );
-
-  }
-
-}
-
-
-connectWebSocket();
-
-
-/* =========================================================
-   SIGNAL HISTORY AUTO UPDATE
-========================================================= */
-
-setInterval(
-  async () => {
-
-    try {
-
-      const data =
-        await getDashboardData();
-
-
-      const signal =
-        data.signal;
-
-
-      if (
-        signal &&
-        signal.direction !== 'WAIT'
-      ) {
-
-        const key =
-          signal.direction +
-          '-' +
-          Math.floor(
-            Date.now() / 60000
-          );
-
-
-        if (
-          key !==
-          state.lastSignalKey
-        ) {
-
-          state.lastSignalKey =
-            key;
-
-
-          state.history.set(
-            key,
-            {
-
-              id:
-                Date.now(),
-
-              direction:
-                signal.direction,
-
-              label:
-                signal.label,
-
-              score:
-                signal.score,
-
-              confidence:
-                signal.confidence,
-
-              entry:
-                signal.entry,
-
-              sl:
-                signal.sl,
-
-              target1:
-                signal.target1,
-
-              target2:
-                signal.target2,
-
-              time:
-                nowISO(),
-
-              read:
-                false
-
-            }
-          );
-
-
-          while (
-            state.history.size >
-            150
-          ) {
-
-            state.history.delete(
-              state.history
-                .keys()
-                .next()
-                .value
-            );
-
-          }
-
-        }
-
-      }
-
-    } catch (error) {
-
-      console.log(
-        'Signal history update:',
-        error.message
-      );
-
-    }
-
-  },
-  10000
-);
-
-
-/* =========================================================
-   GRACEFUL SHUTDOWN
-========================================================= */
-
-process.on(
-  'SIGTERM',
+========================= */
+
+server.listen(
+  PORT,
+  HOST,
   () => {
 
-    try {
-
-      ws?.close();
-
-    } catch (e) {}
-
-
-    server.close(
-      () => process.exit(0)
+    console.log(
+      `BTC AI SCALPING ENGINE V5 listening on ${HOST}:${PORT}`
     );
 
+    refresh();
+
+    setInterval(
+      refresh,
+      15000
+    );
   }
 );
